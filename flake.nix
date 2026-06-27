@@ -61,7 +61,6 @@
           shellHook = ''
             export GZ_SIM_RESOURCE_PATH=${pkgs.px4-gazebo-models}/models
             export GZ_SIM_SERVER_CONFIG_PATH=${pkgs.px4-gazebo-models}/server.config
-            alias load-sitl='${pkgs.asdf}'
             alias start-sim='nixGL gz sim -r ${pkgs.px4-gazebo-models}/worlds/aruco.sdf'
             alias start-headless='start-sim -s'
             alias qcntrl='nixGL QGroundControl'
