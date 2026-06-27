@@ -1,5 +1,6 @@
-{ stdenv
-, fetchFromGitHub
+{
+  stdenv,
+  fetchFromGitHub,
 }:
 
 stdenv.mkDerivation {
@@ -26,7 +27,7 @@ stdenv.mkDerivation {
 
   meta = {
     description = "Description";
-    license = [];
+    license = [ ];
     # platforms = stdenv.lib.platforms.all;
   };
 }
