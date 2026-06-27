@@ -73,7 +73,6 @@
             pkgs.colcon
             pkgs.nixgl.auto.nixGLDefault
             pkgs.px4-gazebo-models
-            pkgs.niv
             pkgs.qgroundcontrol
             pkgs.px4-sitl.copyToDockerDaemon
             # ... other non-ROS packages
