@@ -31,12 +31,10 @@
             (final: prev: {
               px4-gazebo-models = prev.callPackage ./nix/px4-gazebo.nix { };
               nix2container = (prev.callPackage nix2container-src { pkgs = prev; }).nix2container;
-            })
 
-            (final: prev: {
-              px4-sitl = prev.nix2container.buildImage {
+              px4-sitl = final.nix2container.buildImage {
                 name = "px4-sitl";
-                fromImage = prev.nix2container.pullImage {
+                fromImage = final.nix2container.pullImage {
                   imageName = "px4io/px4-sitl";
                   imageDigest = "sha256:b6bfb9e2aece2761ff78831c9bc6f13beb2840c36ba7e010f42b58f97924d2ab";
                   sha256 = "sha256-MjDfYuxpjpFfdi5wFoItEJJjZ4PTLKvlGlNrI4iUfXc=";
