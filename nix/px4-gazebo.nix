@@ -1,10 +1,11 @@
-{ stdenv
-, fetchFromGitHub
+{
+  stdenv,
+  fetchFromGitHub,
 }:
 
-stdenv.mkDerivation rec {
+stdenv.mkDerivation {
   name = "px4-gazebo-models";
-  
+
   src = fetchFromGitHub {
     owner = "px4";
     repo = "PX4-gazebo-models";
@@ -26,7 +27,7 @@ stdenv.mkDerivation rec {
 
   meta = {
     description = "Description";
-    license = [];
+    license = [ ];
     # platforms = stdenv.lib.platforms.all;
   };
 }
