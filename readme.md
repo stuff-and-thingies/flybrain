@@ -27,13 +27,21 @@ nix fmt
 ```
 
 # TODO
-- [ ] get ROS2 msgs start being output by px4 in sitl 
-    - [ ] micro xrce dds agent running in the devshell
-    - [ ] 
-- [ ] get aruco tags detected in sitl with camera
-    - [ ] requires px4 gazebo sitl running
-- [ ] design initial estimator for localization based on aruco tags + imu
+## effort 1: simple imu + gps estimator
+- [x] get ROS2 msgs start being output by px4 in sitl 
+    - [x] micro xrce dds agent running in the devshell
+    - [x] foxglove adapter available
+- [ ] estimator core
+- [ ] ros2 node wrapper for estimator
+- [ ] flybrain launch file using node composition
+
+## effort 2: planner
+- [ ] create some gui that can visualize / set up the fake map for the drone to navigate within
+- [ ] make a* planner that can plan a path through the environment to give to px4 to follow
+
+## effort 3(?): map creation
+- [ ] design / implement SLAM for localization based on aruco tags + imu
+    - [ ] map should be the same that was being emulated for the planner to navigate through
 
 # versions: 
-- ROS2: lyrical
-- v3.0.1  
+- ROS2: kilted
