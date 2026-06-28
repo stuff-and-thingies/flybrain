@@ -32,6 +32,24 @@
               px4-gazebo-models = prev.callPackage ./nix/px4-gazebo.nix { };
               nix2container = (prev.callPackage nix2container-src { pkgs = prev; }).nix2container;
 
+              micro-cdr = prev.callPackage ./nix/micro-cdr.nix { };
+              micro-xrce-dds-client = prev.callPackage ./nix/micro-xrce-dds-client.nix { };
+
+              fast-cdr = prev.callPackage ./nix/fast-cdr.nix { };
+              fast-dds-2 = prev.callPackage ./nix/fast-dds-2.nix { inherit (final) fast-cdr; };
+              spdlog-1_9 = prev.callPackage ./nix/spdlog-1_9.nix { };
+              micro-xrce-dds-agent = prev.callPackage ./nix/micro-xrce-dds-agent.nix {
+                inherit (final) fast-cdr fast-dds-2 spdlog-1_9;
+              };
+
+              rosPackages = prev.rosPackages // {
+                kilted = prev.rosPackages.kilted.overrideScope (
+                  rFinal: _rPrev: {
+                    px4-msgs = rFinal.callPackage ./nix/px4-msgs.nix { };
+                  }
+                );
+              };
+
               px4-sitl = final.nix2container.buildImage {
                 name = "px4-sitl";
                 fromImage = final.nix2container.pullImage {
@@ -72,7 +90,18 @@
             pkgs.nixgl.auto.nixGLDefault
             pkgs.px4-gazebo-models
             pkgs.qgroundcontrol
+            pkgs.micro-xrce-dds-agent
             pkgs.px4-sitl.copyToDockerDaemon
+
+            # https://github.com/lopsided98/nix-ros-overlay/issues/288#issuecomment-2679601803
+            (pkgs.runCommand "ros-autocompletions" { } ''
+              for dir in {bash-completion/completions,zsh/site-functions}; do
+                  mkdir -p $out/share/$dir
+                  for program in {ros2,colcon,rosidl}; do
+                      ${pkgs.python3.pkgs.argcomplete}/bin/register-python-argcomplete $program > $out/share/$dir/_$program
+                  done
+              done
+            '')
             # ... other non-ROS packages
             (
               with pkgs.rosPackages.kilted;
@@ -80,6 +109,8 @@
                 paths = [
                   ros-core
                   ros-gz # gazebo ionic
+                  foxglove-bridge
+                  px4-msgs
                 ];
               }
             )
