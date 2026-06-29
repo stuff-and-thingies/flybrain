@@ -8,3 +8,6 @@ px4/px4-opticalflow/src
 px4/px4-opticalflow/src/
 px4/px4-opticalflow/klt-feature-tracker
 .claude/
+ros2_ws/build
+ros2_ws/install
+ros2_ws/log
