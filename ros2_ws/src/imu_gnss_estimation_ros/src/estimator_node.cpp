@@ -4,36 +4,36 @@ namespace imu_gnss_estimation_ros
 {
 
 EstimatorNode::EstimatorNode()
-    : Node("imu_gnss_estimator_node"), ekf_(loadConfig())
+    : Node("imu_gnss_estimator_node"), _ekf(_load_config())
 {
-    odom_sub_ = this->create_subscription<px4_msgs::msg::VehicleOdometry>(
+    _odom_sub = this->create_subscription<px4_msgs::msg::VehicleOdometry>(
         "/fmu/out/vehicle_odometry", rclcpp::SensorDataQoS(),
         [this](px4_msgs::msg::VehicleOdometry::ConstSharedPtr msg)
-        { this->odom_callback(msg); });
+        { this->_odom_callback(msg); });
 
-    imu_sub_ = this->create_subscription<px4_msgs::msg::SensorCombined>(
+    _imu_sub = this->create_subscription<px4_msgs::msg::SensorCombined>(
         "/fmu/out/sensor_combined", rclcpp::SensorDataQoS(),
         [this](px4_msgs::msg::SensorCombined::ConstSharedPtr msg)
-        { this->imu_callback(msg); });
+        { this->_imu_callback(msg); });
 
-    gps_sub_ = this->create_subscription<px4_msgs::msg::SensorGps>(
+    _gps_sub = this->create_subscription<px4_msgs::msg::SensorGps>(
         "/fmu/out/vehicle_gps_position", rclcpp::SensorDataQoS(),
         [this](px4_msgs::msg::SensorGps::ConstSharedPtr msg)
-        { this->gps_callback(msg); });
+        { this->_gps_callback(msg); });
 
-    ekf_odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>(
+    _ekf_odom_pub = this->create_publisher<nav_msgs::msg::Odometry>(
         "/flybrain/ekf/odom_ned", 10);
 
-    pose_viz_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
+    _pose_viz_pub = this->create_publisher<geometry_msgs::msg::PoseStamped>(
         "/flybrain/ekf/pose_viz", 10);
 
-    path_viz_pub_ = this->create_publisher<nav_msgs::msg::Path>(
+    _path_viz_pub = this->create_publisher<nav_msgs::msg::Path>(
         "/flybrain/ekf/path_viz", 10);
 
-    path_msg_.header.frame_id = "ekf_viz";
+    _path_msg.header.frame_id = "ekf_viz";
 };
 
-imu_gnss_estimation_core::EkfConfig EstimatorNode::loadConfig()
+imu_gnss_estimation_core::EkfConfig EstimatorNode::_load_config()
 {
     imu_gnss_estimation_core::EkfConfig config;
 
@@ -44,6 +44,8 @@ imu_gnss_estimation_core::EkfConfig EstimatorNode::loadConfig()
     this->declare_parameter("gnss_vel_sigma", config.gnss_vel_sigma);
     this->declare_parameter("add_gravity", config.add_gravity);
 
+    this->declare_parameter("max_path_size", static_cast<int>(3000));
+
     config.init_std_p = this->get_parameter("init_std_p").as_double();
     config.init_std_v = this->get_parameter("init_std_v").as_double();
     config.q_std_p = this->get_parameter("q_std_p").as_double();
@@ -51,17 +53,20 @@ imu_gnss_estimation_core::EkfConfig EstimatorNode::loadConfig()
     config.gnss_vel_sigma = this->get_parameter("gnss_vel_sigma").as_double();
     config.add_gravity = this->get_parameter("add_gravity").as_bool();
 
-    gnss_vel_sigma_ = config.gnss_vel_sigma;
+    config.gnss_vel_sigma = this->get_parameter("gnss_vel_sigma").as_double();
+
+    _max_path_size = this->get_parameter("max_path_size").as_int();
+    _gnss_vel_sigma = config.gnss_vel_sigma;
 
     return config;
 }
 
-double EstimatorNode::px4_time_to_sec(uint64_t timestamp_us)
+double EstimatorNode::_px4_time_to_sec(uint64_t timestamp_us)
 {
     return static_cast<double>(timestamp_us * 1.0e-6);
 }
 
-void EstimatorNode::odom_callback(
+void EstimatorNode::_odom_callback(
     px4_msgs::msg::VehicleOdometry::ConstSharedPtr msg)
 {
     const auto& q = msg->q;
@@ -78,50 +83,47 @@ void EstimatorNode::odom_callback(
 
     q_ned_body.normalize();
 
-    imu_gnss_estimation_core::OdometrySample odom_sample;
-    odom_sample.q_ned_body = q_ned_body;
-
-    ekf_.store_quaternion_sample(odom_sample);
-    initial_quaternion_acquired_ = true;
-    latest_quaternion_ = q_ned_body;
+    _latest_quaternion = q_ned_body;
 }
 
-void EstimatorNode::imu_callback(
+void EstimatorNode::_imu_callback(
     px4_msgs::msg::SensorCombined::ConstSharedPtr msg)
 {
-    if (!initial_quaternion_acquired_)
+    if (!_latest_quaternion)
     {
         return;
     }
 
-    if (!last_imu_timestamp_us_)
+    if (!_last_imu_timestamp_us)
     {
-        last_imu_timestamp_us_ = msg->timestamp;
+        _last_imu_timestamp_us = msg->timestamp;
         return;
     }
 
     const double dt =
-        px4_time_to_sec(msg->timestamp - last_imu_timestamp_us_.value());
+        _px4_time_to_sec(msg->timestamp - _last_imu_timestamp_us.value());
 
-    last_imu_timestamp_us_ = msg->timestamp;
+    _last_imu_timestamp_us = msg->timestamp;
 
     imu_gnss_estimation_core::ImuAccelSample imu_sample;
-    imu_sample.timestamp_s = px4_time_to_sec(msg->timestamp);
+    imu_sample.timestamp_s = _px4_time_to_sec(msg->timestamp);
     imu_sample.accel_body_frd_mps2 =
         Eigen::Vector3d(static_cast<double>(msg->accelerometer_m_s2[0]),
                         static_cast<double>(msg->accelerometer_m_s2[1]),
                         static_cast<double>(msg->accelerometer_m_s2[2]));
 
-    ekf_.predict_imu(imu_sample, dt);
+    imu_sample.q_ned_body = _latest_quaternion.value();
 
-    publish_odom(msg->timestamp);
+    _ekf.predict_imu(imu_sample, dt);
+
+    _publish_odom(msg->timestamp);
 }
 
-void EstimatorNode::gps_callback(px4_msgs::msg::SensorGps::ConstSharedPtr msg)
+void EstimatorNode::_gps_callback(px4_msgs::msg::SensorGps::ConstSharedPtr msg)
 {
     imu_gnss_estimation_core::GnssVelocitySample gnss_sample;
 
-    gnss_sample.timestamp_s = px4_time_to_sec(msg->timestamp);
+    gnss_sample.timestamp_s = _px4_time_to_sec(msg->timestamp);
 
     gnss_sample.velocity_ned_mps =
         Eigen::Vector3d(static_cast<double>(msg->vel_n_m_s),
@@ -129,39 +131,39 @@ void EstimatorNode::gps_callback(px4_msgs::msg::SensorGps::ConstSharedPtr msg)
                         static_cast<double>(msg->vel_d_m_s));
 
     gnss_sample.covariance =
-        gnss_vel_sigma_ * gnss_vel_sigma_ * Eigen::Matrix3d::Identity();
+        _gnss_vel_sigma * _gnss_vel_sigma * Eigen::Matrix3d::Identity();
 
-    ekf_.update_gnss_velocity(gnss_sample);
+    _ekf.update_gnss_velocity(gnss_sample);
 
-    publish_odom(msg->timestamp);
+    _publish_odom(msg->timestamp);
 }
 
-void EstimatorNode::publish_odom(uint64_t px4_timestamp_us)
+void EstimatorNode::_publish_odom(uint64_t px4_timestamp_us)
 {
-    const imu_gnss_estimation_core::StateVec& x = ekf_.state();
-    const imu_gnss_estimation_core::StateMat& P = ekf_.covariance();
+    const imu_gnss_estimation_core::StateVec& x = _ekf.state();
+    const imu_gnss_estimation_core::StateMat& P = _ekf.covariance();
 
     nav_msgs::msg::Odometry msg;
     msg.header.stamp = this->get_clock()->now();
     msg.header.frame_id = "ned";
     msg.child_frame_id = "base_link_frd";
 
-    msg.pose.pose.position.x = x(imu_gnss_estimation_core::StateIndex::PN);
-    msg.pose.pose.position.y = x(imu_gnss_estimation_core::StateIndex::PE);
-    msg.pose.pose.position.z = x(imu_gnss_estimation_core::StateIndex::PD);
+    msg.pose.pose.position.x = x(imu_gnss_estimation_core::state_index::POS_N);
+    msg.pose.pose.position.y = x(imu_gnss_estimation_core::state_index::POS_E);
+    msg.pose.pose.position.z = x(imu_gnss_estimation_core::state_index::POS_D);
 
-    if (initial_quaternion_acquired_)
+    if (_latest_quaternion)
     {
-        const Eigen::Quaterniond q = latest_quaternion_.value();
+        const Eigen::Quaterniond q = _latest_quaternion.value();
         msg.pose.pose.orientation.w = q.w();
         msg.pose.pose.orientation.x = q.x();
         msg.pose.pose.orientation.y = q.y();
         msg.pose.pose.orientation.z = q.z();
     }
 
-    msg.twist.twist.linear.x = x(imu_gnss_estimation_core::StateIndex::VN);
-    msg.twist.twist.linear.y = x(imu_gnss_estimation_core::StateIndex::VE);
-    msg.twist.twist.linear.z = x(imu_gnss_estimation_core::StateIndex::VD);
+    msg.twist.twist.linear.x = x(imu_gnss_estimation_core::state_index::VEL_N);
+    msg.twist.twist.linear.y = x(imu_gnss_estimation_core::state_index::VEL_E);
+    msg.twist.twist.linear.z = x(imu_gnss_estimation_core::state_index::VEL_D);
 
     msg.pose.covariance[0] = P(0, 0);
     msg.pose.covariance[7] = P(1, 1);
@@ -171,41 +173,41 @@ void EstimatorNode::publish_odom(uint64_t px4_timestamp_us)
     msg.twist.covariance[7] = P(4, 4);
     msg.twist.covariance[14] = P(5, 5);
 
-    ekf_odom_pub_->publish(msg);
+    _ekf_odom_pub->publish(msg);
 
-    publish_viz_pose_and_path();
+    _publish_viz_pose_and_path();
 }
 
-void EstimatorNode::publish_viz_pose_and_path()
+void EstimatorNode::_publish_viz_pose_and_path()
 {
-    const imu_gnss_estimation_core::StateVec& x = ekf_.state();
+    const imu_gnss_estimation_core::StateVec& x = _ekf.state();
 
     geometry_msgs::msg::PoseStamped pose_msg;
 
     pose_msg.header.stamp = this->get_clock()->now();
     pose_msg.header.frame_id = "ekf_viz";
 
-    pose_msg.pose.position.x = x(imu_gnss_estimation_core::StateIndex::PN);
-    pose_msg.pose.position.y = x(imu_gnss_estimation_core::StateIndex::PE);
-    pose_msg.pose.position.z = -x(imu_gnss_estimation_core::StateIndex::PD);
+    pose_msg.pose.position.x = x(imu_gnss_estimation_core::state_index::POS_N);
+    pose_msg.pose.position.y = x(imu_gnss_estimation_core::state_index::POS_E);
+    pose_msg.pose.position.z = -x(imu_gnss_estimation_core::state_index::POS_D);
 
     pose_msg.pose.orientation.w = 1.0;
     pose_msg.pose.orientation.x = 0.0;
     pose_msg.pose.orientation.y = 0.0;
     pose_msg.pose.orientation.z = 0.0;
 
-    pose_viz_pub_->publish(pose_msg);
+    _pose_viz_pub->publish(pose_msg);
 
-    path_msg_.header.stamp = pose_msg.header.stamp;
-    path_msg_.header.frame_id = "ekf_viz";
-    path_msg_.poses.push_back(pose_msg);
+    _path_msg.header.stamp = pose_msg.header.stamp;
+    _path_msg.header.frame_id = "ekf_viz";
+    _path_msg.poses.push_back(pose_msg);
 
-    if (path_msg_.poses.size() > max_path_size_)
+    if (_path_msg.poses.size() > _max_path_size)
     {
-        path_msg_.poses.erase(path_msg_.poses.begin());
+        _path_msg.poses.erase(_path_msg.poses.begin());
     }
 
-    path_viz_pub_->publish(path_msg_);
+    _path_viz_pub->publish(_path_msg);
 }
 
 }  // namespace imu_gnss_estimation_ros

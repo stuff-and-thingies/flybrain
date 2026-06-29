@@ -7,8 +7,8 @@
 namespace imu_gnss_estimation_core
 {
 
-using StateVec = Eigen::Matrix<double, StateIndex::SIZE, 1>;
+using StateVec = Eigen::Matrix<double, state_index::SIZE, 1>;
 
-using StateMat = Eigen::Matrix<double, StateIndex::SIZE, StateIndex::SIZE>;
+using StateMat = Eigen::Matrix<double, state_index::SIZE, state_index::SIZE>;
 
 }  // namespace imu_gnss_estimation_core

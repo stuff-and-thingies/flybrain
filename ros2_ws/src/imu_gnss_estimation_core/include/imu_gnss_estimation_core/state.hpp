@@ -5,16 +5,16 @@
 namespace imu_gnss_estimation_core
 {
 
-struct StateIndex
+namespace state_index
 {
-    static constexpr int PN = 0;
-    static constexpr int PE = 1;
-    static constexpr int PD = 2;
-    static constexpr int VN = 3;
-    static constexpr int VE = 4;
-    static constexpr int VD = 5;
+static constexpr int POS_N = 0;
+static constexpr int POS_E = 1;
+static constexpr int POS_D = 2;
+static constexpr int VEL_N = 3;
+static constexpr int VEL_E = 4;
+static constexpr int VEL_D = 5;
 
-    static constexpr int SIZE = 6;
-};
+static constexpr int SIZE = 6;
+};  // namespace state_index
 
 }  // namespace imu_gnss_estimation_core

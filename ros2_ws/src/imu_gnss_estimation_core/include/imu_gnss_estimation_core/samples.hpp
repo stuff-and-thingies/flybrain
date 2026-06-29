@@ -9,10 +9,7 @@ struct ImuAccelSample
 {
     double timestamp_s = 0.0;
     Eigen::Vector3d accel_body_frd_mps2 = Eigen::Vector3d::Zero();
-};
 
-struct OdometrySample
-{
     Eigen::Quaterniond q_ned_body = Eigen::Quaterniond::Identity();
 };
 
