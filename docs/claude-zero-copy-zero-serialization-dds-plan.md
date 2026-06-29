@@ -7,36 +7,40 @@
 
 ## 1. Architecture Overview
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│ OS Process: flybrain_container (rclcpp_components)                  │
-│                                                                     │
-│  ┌──────────────────────────┐      ┌──────────────────────────────┐ │
-│  │ px4_bridge::AgentComponent│      │ Other ROS2 Nodes             │ │
-│  │  (NodeLikeListener)      │      │  (const T& callbacks only)   │ │
-│  │                          │      │                              │ │
-│  │  AgentInstance           │      │  rclcpp Subscription         │ │
-│  │  ├─ serial transport     │      │  └─ FastDDS DataReader       │ │
-│  │  └─ FastDDS DataWriter ──┼──────┼──▶ DataSharing SHM pool     │ │
-│  │     (XRCE entities)      │      │    rcl_take_loaned_message() │ │
-│  │                          │      │    handle_loaned_message()   │ │
-│  │  rclcpp::Node (minimal)  │      │    static_cast only          │ │
-│  └──────────────────────────┘      └──────────────────────────────┘ │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-                        ▲
-                   serial (XRCE CDR)
-                        │
-┌─────────────────────────────────────────────────────────────────────┐
-│ PX4 + Micro-XRCE-DDS-Client (separate process / board)             │
-└─────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph LR
+    PX4(["PX4 + Micro-XRCE-DDS-Client\nseparate process / board"])
+
+    subgraph proc["OS Process · flybrain_container (rclcpp_components)"]
+        subgraph agent["px4_bridge::AgentComponent"]
+            serial["serial transport\nXRCE framing"]
+            adw["FastDDS DataWriter\nXRCE pub entities"]
+            adr["FastDDS DataReader\nXRCE sub entities"]
+        end
+
+        shm_rx[("DataSharing SHM\nPX4 → ROS2")]
+        shm_tx[("DataSharing SHM\nROS2 → PX4")]
+
+        subgraph ros2["Other ROS2 Nodes"]
+            dr_rmw["DataReader\nloan take — no deser ✅"]
+            sub_cb["const T& callback"]
+            pub_loan["loaned publish"]
+            dw_rmw["DataWriter\nloan write — no ser ✅"]
+        end
+    end
+
+    PX4 -->|"XRCE CDR (serial)"| serial
+    serial --> adw --> shm_rx -->|"direct pool ptr"| dr_rmw --> sub_cb
+
+    pub_loan --> dw_rmw --> shm_tx -->|"direct pool ptr"| adr --> serial
+    serial -->|"XRCE CDR (serial)"| PX4
 ```
 
 **What is zero-copy / zero-deserialization here:**
-The rmw_fastrtps + rclcpp subscription layer — `rcl_take_loaned_message()` returns a raw pointer directly into the FastDDS DataSharing pool; `handle_loaned_message()` does a `static_cast` and passes it to the callback with a no-op deleter. `deserialize()` is never called.
+The rmw_fastrtps + rclcpp subscription and publication layers. On subscribe: `rcl_take_loaned_message()` returns a raw pointer directly into the FastDDS DataSharing pool; `handle_loaned_message()` does a `static_cast` and passes it to the callback with a no-op deleter — `deserialize()` is never called. On publish: `create_loaned_message()` hands the publisher a pointer directly into the DataSharing pool; `publish(loaned_message)` sets `was_loaned=true` so `serialize()` is never called.
 
 **What still involves encoding:**
-The XRCE serial link. PX4 sends CDR-encoded payloads wrapped in XRCE framing. The agent strips XRCE headers and hands the CDR payload to a FastDDS DataWriter. This one parse of XRCE framing is unavoidable given the serial transport. The DataWriter then places the payload into the DataSharing pool (when DataSharing is enabled, `was_loaned=true` skips `type_->serialize()` entirely per `DataWriterImpl.cpp:996-1027`).
+The XRCE serial link. PX4 sends CDR-encoded payloads wrapped in XRCE framing. The agent strips XRCE headers and hands the CDR payload to a FastDDS DataWriter — one unavoidable parse of XRCE framing per direction. Symmetrically, when the agent receives from its DataReader and forwards to PX4, it re-encodes in XRCE framing before writing to serial.
 
 **What this does NOT apply to:**
 - Cross-machine traffic (intentional — full ser/deser when data leaves the process)
@@ -45,9 +49,41 @@ The XRCE serial link. PX4 sends CDR-encoded payloads wrapped in XRCE framing. Th
 
 ---
 
-## 2. Prerequisites and Gating Conditions
+## 2. What is a "Loan"?
 
-### 2.1 RMW must be rmw_fastrtps_cpp
+> **Reference reading:**
+> - [ROS2 Kilted — Configure Zero Copy Loaned Messages](https://docs.ros.org/en/kilted/How-To-Guides/Configure-ZeroCopy-loaned-messages.html) — high-level how-to
+> - [ROS2 Design: Zero Copy via Loaned Messages](https://design.ros2.org/articles/zero_copy.html) — full design rationale and API specification
+
+A **loaned message** is a block of memory borrowed directly from the FastDDS DataSharing pool instead of being allocated on the heap. The pool is a fixed-size POSIX shared-memory segment (mmap) that both the DataWriter and DataReader can access — no OS copy is needed to move data between them.
+
+**Subscriber side — taking a loan:**
+
+Normally, when a DataReader calls `take()`, FastDDS copies the data from its internal history into a freshly allocated buffer and calls `deserialize()` to convert CDR bytes into a C++ struct. With a loan, instead:
+
+1. `take()` returns a pointer directly into the history buffer (which lives in the DataSharing pool)
+2. No CDR deserialization happens — the struct is already laid out in memory the way C++ expects it, because `is_plain()` guarantees the memory layout matches CDR exactly
+3. The caller owns the pointer only until it calls `return_loan()` — after that the pool reclaims the slot
+
+In rclcpp, the executor calls `return_loan()` immediately after your callback returns. The `shared_ptr` your callback receives has a **no-op deleter** — it does nothing when the ref count hits zero. The actual memory is owned by the pool, not the `shared_ptr`. Storing that `shared_ptr` after the callback is undefined behavior.
+
+**Publisher side — borrowing a loan:**
+
+Normally, `publisher->publish(msg)` copies the struct into a CDR serialization buffer and hands those bytes to the DataWriter. With a loan:
+
+1. `create_loaned_message()` returns a `LoanedMessage<T>` wrapping a pointer into the DataSharing pool
+2. You populate the struct fields directly in pool memory — no intermediate copy
+3. `publish(loaned_message)` hands ownership back; the DataWriter writes the entry to history with `was_loaned=true`, which causes `DataWriterImpl` to skip `type_->serialize()` entirely
+
+**The `is_plain()` gate:**
+
+Both paths require that `is_plain(XCDR_DATA_REPRESENTATION)` returns true for the message type. This compile-time constexpr check (generated into the PubSubTypes header) verifies that the struct's in-memory size and layout exactly match its CDR wire encoding — no padding, no variable-length fields. If it returns false, `loan_sample()` fails with `RETCODE_ILLEGAL_OPERATION` and the loan path is silently bypassed in rmw_fastrtps.
+
+---
+
+## 3. Prerequisites and Gating Conditions
+
+### 3.1 RMW must be rmw_fastrtps_cpp
 
 The loan path (`__init_subscription_for_loans`, `__rmw_take_loaned_message_internal`) is implemented only in rmw_fastrtps. Verify:
 
@@ -57,7 +93,7 @@ ros2 doctor --report | grep rmw
 echo $RMW_IMPLEMENTATION  # must be empty (default) or rmw_fastrtps_cpp
 ```
 
-### 2.2 Message types must pass `is_plain()`
+### 3.2 Message types must pass `is_plain()`
 
 `rmw_fastrtps_shared_cpp/src/rmw_take.cpp:573-585` sets `can_loan_messages = info->type_support_->is_plain(XCDR_DATA_REPRESENTATION)`. If this returns false, the loan path is skipped silently and full deserialize occurs.
 
@@ -75,77 +111,125 @@ grep -A5 "is_plain_xcdrv1_impl" \
 
 Messages that will NOT be plain (no loan support): any px4_msgs type with `string` fields or `sequence<>` in the IDL. Audit `px4_msgs/msg/*.msg` and maintain a list of which messages qualify.
 
-### 2.3 `ROS_DISABLE_LOANED_MESSAGES` must be 0
+### 3.3 `ROS_DISABLE_LOANED_MESSAGES` must be 0
 
 Default is `1` (loans disabled globally). The rclcpp executor checks this at subscription creation time. Must be set in the launch environment before any node is initialized.
 
-### 2.4 DataSharing must be enabled on both DataWriter and DataReader
+### 3.4 DataSharing must be enabled on both DataWriter and DataReader
 
-The XRCE agent creates FastDDS DataWriter entities; rmw_fastrtps creates DataReader entities. Both sides must have DataSharing QoS enabled for the shared-memory pool to be established between them. This is configured via FastDDS XML profile (see Section 4).
+The XRCE agent creates FastDDS DataWriter and DataReader entities; rmw_fastrtps creates the mirrored DataReader and DataWriter entities. Both sides of each pair must have DataSharing QoS enabled for the shared-memory pool to be established. This is configured via FastDDS XML profile (see Section 5).
 
 ---
 
-## 3. Stack Trace: The Full Zero-Copy Path
+## 4. Stack Traces: The Full Zero-Copy Path
 
 Understanding the exact code path clarifies what must be true for zero-copy to hold end-to-end.
 
-### 3.1 Writer side (XRCE Agent → FastDDS DataWriter → DataSharing pool)
+### 4.1 XRCE Agent DataWriter → DataSharing pool (PX4 → ROS2, write side)
 
-```
-AgentInstance::run() [background thread]
-  └─ FastDDS middleware (FastMiddleware in agent internals)
-       └─ DataWriter::write(sample)
-            └─ DataWriterImpl::create_new_change_with_params()
-                 └─ check_and_remove_loan(data, payload)   ← DataWriterImpl.cpp:996
-                      if (was_loaned):
-                        payload already points into DataSharing pool
-                        type_->serialize() is SKIPPED          ← line 1015 not reached
-                      else:
-                        type_->serialize() called (CDR copy)
-```
+```mermaid
+flowchart TD
+    A["AgentInstance::run()\n(background thread)"]
+    B["FastDDS DataWriter::write(sample)"]
+    C["DataWriterImpl::create_new_change_with_params()"]
+    D{"check_and_remove_loan(data, payload)\nDataWriterImpl.cpp:996"}
+    E["was_loaned = true\npayload already points into DataSharing pool"]
+    F["type_->serialize() SKIPPED\ndata written directly to history\nDataWriterImpl.cpp:1015 not reached"]
+    G["was_loaned = false\nstock XRCE agent — no loan_sample() call"]
+    H["type_->serialize() called\nCDR copy into payload buffer\nDataWriterImpl.cpp:1015"]
+    I[("FastDDS history\nDataSharing SHM pool")]
 
-For `was_loaned=true`, the agent would need to acquire a loaned sample via `DataWriter::loan_sample()` before writing. The stock XRCE agent does NOT do this — it writes by value. This means there is still one `serialize()` call on the agent's DataWriter (CDR encoding of the message struct). The DataSharing pool then holds the CDR bytes.
-
-**To achieve full writer-side zero-copy:** patch the agent's FastDDS middleware to use `loan_sample()` before `write()`. This is advanced and requires forking the agent. The base plan (Section 5) does not require this — it achieves zero-copy on the **reader side** only, which is the higher-value half (avoids per-subscriber deserialization for N subscribers).
-
-### 3.2 Reader side (DataSharing pool → rmw → rclcpp → callback)
-
-```
-rclcpp Executor::execute_subscription()           ← executor.cpp:566
-  if (subscription->can_loan_messages()):         ← subscription_base.cpp:342
-    rcl_take_loaned_message()
-      └─ rmw_take_loaned_message()
-           └─ __rmw_take_loaned_message_internal() ← rmw_take.cpp:611
-                data_reader_->take(data_seq, info_seq, 1)
-                return data_seq.buffer()[0]         ← direct pointer into DataSharing pool
-    handle_loaned_message(loaned_ptr, info)         ← subscription.hpp:388
-      auto typed = static_cast<ROSMessageType*>(loaned_ptr)   ← CAST ONLY, no deserialize
-      auto sptr = shared_ptr<ROSMessageType>(typed, [](ROSMessageType*){})  ← no-op deleter
-      any_callback_.dispatch(sptr, info)
-    rcl_return_loaned_message_from_subscription()   ← IMMEDIATELY after callback returns
+    A --> B --> C --> D
+    D -->|"loan path\nrequires agent fork"| E --> F --> I
+    D -->|"stock agent path"| G --> H --> I
 ```
 
-The no-op deleter means the `shared_ptr` does NOT own the memory. The loan is returned the moment the callback stack unwinds. Storing the `shared_ptr` beyond the callback is undefined behavior — the memory returns to the pool.
+For `was_loaned=true`, the agent would need to acquire a loaned sample via `DataWriter::loan_sample()` before writing. The stock XRCE agent does NOT do this — it writes by value, meaning one `serialize()` call happens on the write side. The DataSharing pool then holds the serialized CDR bytes.
 
-### 3.3 Callback dispatch (any_subscription_callback.hpp)
+**To achieve full writer-side zero-copy on this path:** patch the agent's FastDDS middleware to use `loan_sample()` before `write()`. This requires forking the agent. The base plan does not require this — reader-side zero-copy removes per-subscriber deserialization, which is the larger win when N nodes subscribe.
 
+### 4.2 rmw DataReader → rclcpp callback (PX4 → ROS2, read side)
+
+This is the primary zero-copy path — the one that eliminates per-subscriber deserialization.
+
+```mermaid
+flowchart TD
+    A["rclcpp Executor::execute_subscription()\nexecutor.cpp:566"]
+    B{"subscription->can_loan_messages()?\nsubscription_base.cpp:342\nrequires is_plain() AND ROS_DISABLE_LOANED_MESSAGES=0"}
+
+    C["rcl_take_loaned_message()"]
+    D["__rmw_take_loaned_message_internal()\nrmw_take.cpp:611"]
+    E["data_reader_->take(data_seq, info_seq, 1)\ndirect into DataSharing pool"]
+    F["return data_seq.buffer()[0]\nraw pointer — no copy, no deser"]
+    G["handle_loaned_message(loaned_ptr, info)\nsubscription.hpp:388"]
+    H["static_cast<ROSMessageType*>(loaned_ptr)\nNO deserialize call"]
+    I["shared_ptr with no-op deleter\ndoes NOT own memory"]
+    J["any_callback_.dispatch(sptr, info)"]
+    K["rcl_return_loaned_message_from_subscription()\nexecutor.cpp:604 — loan returned immediately"]
+
+    L["fallback: copy path\ncreate_message() + take_type_erased()\nallocate + deserialize"]
+
+    A --> B
+    B -->|true| C --> D --> E --> F --> G --> H --> I --> J --> K
+    B -->|false| L
 ```
-dispatch(shared_ptr<ROSMessageType> message, MessageInfo info):
-  // Variant: ConstRefCallback void(const T&)
-  callback(*message)                               ← direct reference, no copy ✅
 
-  // Variant: UniquePtrCallback void(unique_ptr<T>)
-  callback(create_ros_unique_ptr_from_ros_shared_ptr_message(message))
-    ─▶ allocate(1) + construct(*message)           ← HEAP ALLOC + COPY ⚠️ safe but not zero-copy
+The no-op deleter means the `shared_ptr` does NOT own the pool memory. The loan is returned the moment the callback stack unwinds. Storing the `shared_ptr` beyond the callback is undefined behavior.
 
-  // Variant: SharedPtrCallback void(shared_ptr<T>)
-  callback(message)                                ← no-op deleter shared_ptr passed in
-                                                   ← UNSAFE to store ❌
+### 4.3 Callback dispatch variants
+
+```mermaid
+flowchart TD
+    A["any_callback_.dispatch(sptr, info)\nany_subscription_callback.hpp"]
+    B{"callback variant"}
+
+    C["ConstRefCallback\nvoid(const T&)"]
+    D["callback(*message)\ndirect dereference — zero-copy ✅\nvalid only during callback"]
+
+    E["UniquePtrCallback\nvoid(unique_ptr T)"]
+    F["create_ros_unique_ptr_from_ros_shared_ptr_message()\nallocate + copy-construct\nheap alloc + copy ⚠️ safe to store"]
+
+    G["SharedPtrCallback\nvoid(shared_ptr T)"]
+    H["callback(message)\nno-op deleter ptr passed in\nUNSAFE to store\nloan returned after callback ❌"]
+
+    A --> B
+    B --> C --> D
+    B --> E --> F
+    B --> G --> H
+```
+
+### 4.4 rmw Publisher loaned write (ROS2 → PX4, write side)
+
+This is the zero-copy publish path. The publisher writes directly into the DataSharing pool; the XRCE agent DataReader reads from the pool without copying.
+
+```mermaid
+flowchart TD
+    A["publisher->create_loaned_message()\nrcl_borrow_loaned_message()"]
+    B["rmw_borrow_loaned_message()\nrmw_fastrtps_shared_cpp"]
+    C["DataWriter::loan_sample()\nDataWriterImpl.cpp:506"]
+    D{"is_plain(XCDR_DATA_REPRESENTATION)?"}
+    E["pointer into DataSharing SHM pool\nuser populates struct fields directly"]
+    F["RETCODE_ILLEGAL_OPERATION\ntype not eligible — use standard publish()"]
+    G["publisher->publish(loaned_message)\nrcl_publish_loaned_message()"]
+    H["DataWriterImpl::write()\ncheck_and_remove_loan() → was_loaned=true\nDataWriterImpl.cpp:996"]
+    I["type_->serialize() SKIPPED\nDataWriterImpl.cpp:1015 not reached"]
+    J[("DataSharing SHM pool\nXRCE agent DataReader takes from here\nforwards to PX4 via XRCE CDR serial")]
+
+    A --> B --> C --> D
+    D -->|true| E --> G --> H --> I --> J
+    D -->|false| F
+```
+
+**Usage:**
+```cpp
+auto loan = pub->create_loaned_message();  // LoanedMessage<T>
+loan.get().field = value;                  // write directly into pool memory
+pub->publish(std::move(loan));             // was_loaned=true, no serialize
 ```
 
 ---
 
-## 4. FastDDS DataSharing XML Profile
+## 5. FastDDS DataSharing XML Profile
 
 DataSharing must be configured on both the XRCE agent's FastDDS entities and the rmw_fastrtps entities. Since both live in the same process and FastDDS reads XML profiles at entity creation time via `FASTDDS_DEFAULT_PROFILES_FILE`, a single XML file applies to both.
 
@@ -178,11 +262,11 @@ DataSharing must be configured on both the XRCE agent's FastDDS entities and the
 
 **`AUTOMATIC`** means FastDDS enables DataSharing when the type is eligible (is_plain + is_bounded) and falls back to standard transport otherwise — safe to apply globally.
 
-The file path is passed via environment variable (see Section 7, Launch Configuration).
+The file path is passed via environment variable (see Section 8, Launch Configuration).
 
 ---
 
-## 5. AgentComponent Implementation
+## 6. AgentComponent Implementation
 
 The XRCE agent does not subclass `rclcpp::Node`. Use the NodeLikeListener pattern so the component loader can manage it without lifecycle overhead.
 
@@ -297,9 +381,9 @@ RCLCPP_COMPONENTS_REGISTER_NODE(px4_bridge::AgentComponent)
 
 ---
 
-## 6. Loan-Safe Subscription Factory
+## 7. Loan-Safe Subscription Factory
 
-### 6.1 Type Traits
+### 7.1 Type Traits
 
 The safety wrapper uses `rclcpp::function_traits::function_traits<>` (a public rclcpp header) to extract the callback's first argument type at compile time, then `static_assert` that it is not a `shared_ptr` variant.
 
@@ -343,7 +427,7 @@ struct is_shared_ptr<std::shared_ptr<const T>> : std::true_type {};
 /// shared_ptr, catching the unsafe pattern at compile time rather than at runtime.
 ///
 /// Safe callback signatures:
-///   void(const MessageT &)                         — zero-copy, zero-deser ✅
+///   void(const MessageT &)                         — zero-copy, preferred ✅
 ///   void(const MessageT &, const rclcpp::MessageInfo &)  — same, with metadata ✅
 ///   void(std::unique_ptr<MessageT>)                — safe, allocates+copies ⚠️
 ///   void(std::unique_ptr<MessageT>, const rclcpp::MessageInfo &)  — same ⚠️
@@ -386,7 +470,7 @@ create_subscription(
 }  // namespace px4_bridge
 ```
 
-### 6.2 Usage in Node Code
+### 7.2 Usage in Node Code
 
 ```cpp
 // Instead of:
@@ -410,7 +494,7 @@ px4_bridge::create_subscription<px4_msgs::msg::SensorCombined>(
   });
 ```
 
-### 6.3 Compile-time error example
+### 7.3 Compile-time error example
 
 ```
 error: static_assert failed:
@@ -426,9 +510,9 @@ note: in instantiation of function template specialization
 
 ---
 
-## 7. Launch Configuration
+## 8. Launch Configuration
 
-### 7.1 Environment Variables
+### 8.1 Environment Variables
 
 Two variables must be set before any node is initialized:
 
@@ -437,7 +521,7 @@ Two variables must be set before any node is initialized:
 | `ROS_DISABLE_LOANED_MESSAGES` | `0` | Enables the loan path in rclcpp executor (default `1` disables it) |
 | `FASTDDS_DEFAULT_PROFILES_FILE` | path to `fastdds_datasharing.xml` | Enables DataSharing QoS on all FastDDS entities in the process |
 
-### 7.2 Launch File
+### 8.2 Launch File
 
 **File: `src/px4_bridge/launch/flybrain.launch.py`**
 
@@ -485,7 +569,7 @@ def generate_launch_description():
 
 ---
 
-## 8. CMakeLists.txt
+## 9. CMakeLists.txt
 
 **File: `src/px4_bridge/CMakeLists.txt`**
 
@@ -556,7 +640,7 @@ ament_package()
 
 ---
 
-## 9. Nix Integration
+## 10. Nix Integration
 
 The Micro-XRCE-DDS-Agent is already packaged in `nix/micro-xrce-dds-agent.nix`. For `colcon` to find it during the ROS workspace build, it must be on `CMAKE_PREFIX_PATH` or installed into the ROS prefix.
 
@@ -578,11 +662,11 @@ find $(nix-build -A micro-xrce-dds-agent)/lib/cmake -name "*.cmake" 2>/dev/null 
 
 ---
 
-## 10. Verification Checklist
+## 11. Verification Checklist
 
 After implementation, verify each layer of the chain.
 
-### 10.1 DataSharing is established
+### 11.1 DataSharing is established
 
 ```bash
 # FastDDS logs DataSharing pool creation at INFO level.
@@ -593,7 +677,7 @@ ros2 launch px4_bridge flybrain.launch.py 2>&1 | grep -i "data.shar"
 # Expect: "Data sharing activated" or "DataSharingPayloadPool"
 ```
 
-### 10.2 Loan path is active
+### 11.2 Loan path is active (subscribe side)
 
 ```bash
 # rclcpp emits a WARN_ONCE when loans are active (subscription_base.cpp:342-358).
@@ -603,7 +687,7 @@ ros2 launch px4_bridge flybrain.launch.py 2>&1 | grep -i "data.shar"
 ros2 launch px4_bridge flybrain.launch.py 2>&1 | grep -i "loan"
 ```
 
-### 10.3 `is_plain()` check passes for target messages
+### 11.3 `is_plain()` check passes for target messages
 
 ```bash
 # After colcon build, grep the generated type support:
@@ -612,16 +696,15 @@ grep -A3 "is_plain" \
 # Expect: return true (or a constexpr size check that evaluates to true)
 ```
 
-### 10.4 `ROS_DISABLE_LOANED_MESSAGES` is seen by the executor
+### 11.4 `ROS_DISABLE_LOANED_MESSAGES` is seen by the executor
 
 ```bash
-# The executor checks this at subscription creation, not at exec time.
 # Confirm by temporarily setting it to 1 and verifying the WARN_ONCE disappears.
 ROS_DISABLE_LOANED_MESSAGES=1 ros2 launch px4_bridge flybrain.launch.py 2>&1 | grep -i "loan"
 # Expect: no loan warning (loans disabled, fallback to copy path)
 ```
 
-### 10.5 Compile-time enforcement catches shared_ptr callbacks
+### 11.5 Compile-time enforcement catches shared_ptr callbacks
 
 ```cpp
 // This must fail to compile:
@@ -633,22 +716,22 @@ px4_bridge::create_subscription<px4_msgs::msg::SensorCombined>(
 
 ---
 
-## 11. Limitations and Constraints
+## 12. Limitations and Constraints
 
 | Constraint | Detail |
 |---|---|
-| Same machine only | DataSharing uses POSIX SHM (mmap). Cross-machine traffic falls back to UDP/SHM disabled — full ser/deser as expected. |
+| Same machine only | DataSharing uses POSIX SHM (mmap). Cross-machine traffic falls back to UDP — full ser/deser as expected. |
 | `is_plain()` types only | Any px4_msgs type with `string` or `sequence<>` fields silently falls back to copy path. Audit IDL files. |
 | `rmw_fastrtps_cpp` required | rmw_zenoh always serializes/deserializes (confirmed via source). rmw_cyclonedds has no loan support. Do not switch RMW. |
 | const-ref callbacks: read-only during callback | The loan is returned immediately after callback returns. Do not capture `&msg` into a lambda or store it as a pointer. |
 | unique_ptr callbacks: safe but copies | `AnySubscriptionCallback::dispatch()` for unique_ptr calls `create_ros_unique_ptr_from_ros_shared_ptr_message()` which heap-allocates and copies. Safe to store; not zero-copy. |
 | One agent per process | `AgentInstance` is a singleton. Only one `AgentComponent` per container. |
-| Writer-side zero-copy: not included | The stock XRCE agent calls `DataWriter::write()` by value (one `serialize()` call). Achieving writer-side loan requires forking the agent's FastDDS middleware. This is left as a future optimization — reader-side zero-copy removes per-subscriber deserialization which is the larger win at N subscribers. |
-| XRCE CDR overhead | The serial XRCE framing parse is unavoidable. This is the intended protocol boundary. |
+| Writer-side zero-copy (XRCE→DDS): not included | The stock XRCE agent calls `DataWriter::write()` by value (one `serialize()` call). Writer-side loan on the PX4→ROS2 path requires forking the agent's FastDDS middleware. Left as a future optimization. |
+| XRCE CDR framing overhead | The serial XRCE framing parse/encode is unavoidable in both directions. This is the intended protocol boundary. |
 
 ---
 
-## 12. Source References
+## 13. Source References
 
 All claims in this document are grounded in these source locations:
 
