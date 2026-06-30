@@ -110,6 +110,19 @@
                   ros-core
                   ros-gz # gazebo ionic
                   foxglove-bridge
+
+                  # build tools for ROS 2 ament cmake
+                  ament-cmake
+                  ament-cmake-core
+                  ament-lint-auto
+                  ament-lint-common
+
+                  # dependencies used by ros2_ws packages
+                  eigen3-cmake-module # we'll probably need this regardless
+                  rclcpp
+                  nav-msgs
+                  tf2
+                  tf2-ros
                   px4-msgs
                 ];
               }
