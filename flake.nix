@@ -46,6 +46,7 @@
                 kilted = prev.rosPackages.kilted.overrideScope (
                   rFinal: _rPrev: {
                     px4-msgs = rFinal.callPackage ./nix/px4-msgs.nix { };
+                    px4-ros2-cpp = rFinal.callPackage ./nix/px4-ros2-cpp.nix { };
                   }
                 );
               };
@@ -124,6 +125,7 @@
                   tf2
                   tf2-ros
                   px4-msgs
+                  px4-ros2-cpp
                 ];
               }
             )
