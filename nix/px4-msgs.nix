@@ -15,8 +15,8 @@ buildRosPackage {
   src = fetchFromGitHub {
     owner = "PX4";
     repo = "px4_msgs";
-    rev = "fbf499b1ab34207821de508f64a1677057bdda3a";
-    hash = "sha256-HjrdQqLIqdpNEMZTSJSMcTImSM91qLccRNNqLJqrLIQ=";
+    rev = "ff7ae284c4b9cb1c39d182e9f1a1343b3817011e";
+    hash = "sha256-6G6cmLqmEHfOZy8uFzlpH8IzkIrgJjwuqV3LM6VPOAo=";
   };
 
   buildType = "ament_cmake";
