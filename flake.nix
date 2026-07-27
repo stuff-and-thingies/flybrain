@@ -60,8 +60,28 @@
                 };
                 config =
                   let
-                    app = pkgs.writeScript "entry" (builtins.readFile ./sih-entrypoint.sh);
+                    app = pkgs.writeScript "entry" (builtins.readFile ./px4-entrypoint.sh);
                   in
+                  {
+                    entrypoint = [ app ];
+                  };
+              };
+
+              px4-sitl-gazebo = final.nix2container.buildImage {
+                name = "px4-sitl-gazebo";
+
+                fromImage = final.nix2container.pullImage {
+                  imageName = "px4io/px4-sitl-gazebo";
+                  imageDigest = "sha256:6805a3cee0c0b30bc16161ea1d00d3394aba8617c0a875cd66ffebf6d805dd8e";
+                  sha256 = pkgs.lib.fakeHash;
+                };
+
+                config = 
+                  let
+                    app = pkgs.writeScript "entry" (
+                      builtins.readFile ./px4-entrypoint.sh
+                    );
+                  in 
                   {
                     entrypoint = [ app ];
                   };
