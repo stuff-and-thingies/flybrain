@@ -73,7 +73,7 @@
                 fromImage = final.nix2container.pullImage {
                   imageName = "px4io/px4-sitl-gazebo";
                   imageDigest = "sha256:6805a3cee0c0b30bc16161ea1d00d3394aba8617c0a875cd66ffebf6d805dd8e";
-                  sha256 = pkgs.lib.fakeHash;
+                  sha256 = "sha256-MNSg53u3i5MoxG99XzkcqhExuNY3Xvhe8Z8NxyrTLP4=";
                 };
 
                 config = 
@@ -84,6 +84,15 @@
                   in 
                   {
                     entrypoint = [ app ];
+
+                    env = [
+                      "PX4_GZ_MODELS=/opt/px4-gazebo/share/gz/models"
+                      "PX4_GZ_WORLDS=/opt/px4-gazebo/share/gz/worlds"
+
+                      "GZ_SIM_RESOURCE_PATH=/opt/px4-gazebo/share/gz/models:/opt/px4-gazebo/share/gz/worlds"
+                      "GZ_SIM_SERVER_CONFIG_PATH=/opt/px4-gazebo/share/gz/server.config"
+                      "GZ_SIM_SYSTEM_PLUGIN_PATH=/opt/px4-gazebo/lib/gz/plugins"
+                    ];
                   };
               };
             })
@@ -96,15 +105,47 @@
           name = "sim-env";
           NIXPKGS_ALLOW_UNFREE = 1;
           shellHook = ''
-            export GZ_SIM_RESOURCE_PATH=${pkgs.px4-gazebo-models}/models
-            export GZ_SIM_SERVER_CONFIG_PATH=${pkgs.px4-gazebo-models}/server.config
-            alias start-sim='nixGL gz sim -r ${pkgs.px4-gazebo-models}/worlds/aruco.sdf'
-            alias start-headless='start-sim -s'
             alias qcntrl='nixGL QGroundControl'
+
+            export FLYBRAIN_PX4_GZ_IMAGE="px4-sitl-gazebo:${pkgs.px4-sitl-gazebo.imageTag}"
+            export FLYBRAIN_PX4_GZ_COPY="${pkgs.px4-sitl-gazebo.copyToDockerDaemon}/bin/copy-to-docker-daemon"
+            export FLYBRAIN_PX4_GZ_MODELS="${pkgs.px4-gazebo-models}/models"
+            export FLYBRAIN_PX4_GZ_WORLDS="${pkgs.px4-gazebo-models}/worlds"
+            export FLYBRAIN_PX4_GZ_SERVER_CONFIG="${pkgs.px4-gazebo-models}/server.config"
+            export FLYBRAIN_GZ_BRIDGE_IMAGE="flybrain-ros-gz-harmonic-bridge:dev"
+            export GZ_SIM_RESOURCE_PATH="$FLYBRAIN_PX4_GZ_MODELS:$FLYBRAIN_PX4_GZ_WORLDS''${GZ_SIM_RESOURCE_PATH:+:$GZ_SIM_RESOURCE_PATH}"
+            export GZ_SIM_SERVER_CONFIG_PATH="''${GZ_SIM_SERVER_CONFIG_PATH:-$FLYBRAIN_PX4_GZ_SERVER_CONFIG}"
+
+            ensure-gz-bridge() {
+              if ! command -v docker >/dev/null 2>&1; then
+                echo "warning: docker not found; skipping Gazebo bridge image build" >&2
+                return 0
+              fi
+
+              if ! docker info >/dev/null 2>&1; then
+                echo "warning: docker daemon unavailable; skipping Gazebo bridge image build" >&2
+                return 0
+              fi
+
+              docker image inspect "$FLYBRAIN_GZ_BRIDGE_IMAGE" >/dev/null 2>&1 \
+                || docker build \
+                  -t "$FLYBRAIN_GZ_BRIDGE_IMAGE" \
+                  docker/ros-gz-harmonic-bridge
+            }
 
             alias start-sih-sitl='docker image inspect px4-sitl:${pkgs.px4-sitl.imageTag} >/dev/null 2>&1 \
               || ${pkgs.px4-sitl.copyToDockerDaemon}/bin/copy-to-docker-daemon \
-              && docker run --rm -it --network host px4-sitl:${pkgs.px4-sitl.imageTag}'
+              && docker run --rm -it \
+                --network host \
+                px4-sitl:${pkgs.px4-sitl.imageTag}'
+
+            alias build-gz-bridge='docker build \
+              -t "$FLYBRAIN_GZ_BRIDGE_IMAGE" \
+              docker/ros-gz-harmonic-bridge'
+
+            alias start-sim-host-gz='./scripts/start-sim-host-gz.sh "$FLYBRAIN_PX4_GZ_IMAGE"'
+
+            ensure-gz-bridge
           '';
           packages = [
             pkgs.colcon
@@ -113,6 +154,7 @@
             pkgs.qgroundcontrol
             pkgs.micro-xrce-dds-agent
             pkgs.px4-sitl.copyToDockerDaemon
+            pkgs.px4-sitl-gazebo.copyToDockerDaemon
 
             # https://github.com/lopsided98/nix-ros-overlay/issues/288#issuecomment-2679601803
             (pkgs.runCommand "ros-autocompletions" { } ''
