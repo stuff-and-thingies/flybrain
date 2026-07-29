@@ -21,82 +21,21 @@
 # raspberry pi 5 system (`flybrain-rpi5`)
 
 The `flybrain-rpi5` NixOS config targets `aarch64-linux`, so an `x86_64-linux`
-dev box cannot build it as-is. There are two ways to get a system closure.
-
-## cross-compiling from x86_64 (no emulation)
-
-`nixos-raspberrypi` sets `nixpkgs.hostPlatform = "aarch64-linux"` and leaves
-`nixpkgs.buildPlatform` defaulted to that same value — which is a *native*
-aarch64 build. Setting `buildPlatform` explicitly flips nixpkgs into a cross
-splice (the machinery behind `pkgsCross.aarch64-multiplatform`), so every
-compiler runs natively on x86_64 and emits aarch64 code.
-
-Add a cross variant alongside the existing config in `flake.nix`:
-
-```nix
-nixosConfigurations = rec {
-  flybrain-rpi5 = nixos-raspberrypi.lib.nixosSystemFull {
-    # ... unchanged ...
-  };
-
-  # identical config, cross-compiled from x86_64
-  flybrain-rpi5-cross = flybrain-rpi5.extendModules {
-    modules = [ { nixpkgs.buildPlatform = "x86_64-linux"; } ];
-  };
-};
-```
-
-Then build the system closure:
-
-```
-nix build .#nixosConfigurations.flybrain-rpi5-cross.config.system.build.toplevel
-```
-
-This needs no `binfmt_misc` registration, no `extra-platforms`, and no aarch64
-remote builder. The RPi5 vendor kernel, the 16k-page-size variant, ZFS
-userland and the ZFS kernel module all cross-compile.
-
-### what you give up
-
-Cross-built store paths hash differently from the natively-built aarch64 paths
-published to `cache.nixos.org` and `nixos-raspberrypi.cachix.org`, so the
-prebuilt kernel/firmware and most of the system closure stop substituting and
-get compiled locally instead.
-
-Measured on this config (`toplevel`, ZFS + NVMe + RPi5 vendor kernel):
-
-| build mode | built locally | substituted |
-| --- | --- | --- |
-| native aarch64 (emulated) | 74 derivations | 595 paths / ~970 MiB |
-| cross from x86_64 | 420 derivations | 48 paths / ~55 MiB |
-
-So cross compiles roughly 6x more locally, but each of those builds runs at
-full native x86_64 speed instead of under qemu. (The cross row was measured
-with the cross toolchain already in the store; from a cold store also expect a
-few GB of x86_64 build-time dependencies.)
-
-### disk images still need emulation
-
-`config.system.build.toplevel` cross-compiles cleanly, but
-`config.system.build.diskoImages` does not get you out of emulation — disko
-builds the image inside a VM and pulls in an *aarch64* qemu to partition and
-format it, so that step still needs binfmt/qemu or an aarch64 builder.
-
-To deploy without building an image at all, push the cross-built closure
-straight to the board:
-
-```
-nixos-rebuild switch \
-  --flake .#flybrain-rpi5-cross \
-  --target-host root@<pi-address>
-```
+dev box cannot build it as-is. Cross-compiling (`nixpkgs.buildPlatform =
+"x86_64-linux"`) is possible but was dropped here — it forces most of the
+closure (RPi5 vendor kernel, ZFS, etc.) to rebuild locally from source instead
+of substituting from `cache.nixos.org`/`nixos-raspberrypi.cachix.org`, since
+cross-built store paths hash differently from the natively-built aarch64 paths
+those caches publish. Building `aarch64-linux` under emulation instead keeps
+the cache hits, at the cost of the (small) parts of the closure that do need
+to build running under qemu instead of natively.
 
 ## native aarch64 build under qemu (keeps the binary caches)
 
-The alternative is to build the unmodified `flybrain-rpi5` config as
-`aarch64-linux` under emulation, which keeps all the cache hits. This needs
-`qemu-user-static` registered with the `F` (fix-binary) flag — `F` is required
-so the interpreter stays visible inside the nix build sandbox.
+Build the unmodified `flybrain-rpi5` config as `aarch64-linux` under
+emulation. This needs `qemu-user-static` registered with the `F`
+(fix-binary) flag — `F` is required so the interpreter stays visible inside
+the nix build sandbox.
 
 on Fedora:
 ```
@@ -118,6 +57,58 @@ and build:
 ```
 nix build .#nixosConfigurations.flybrain-rpi5.config.system.build.toplevel
 ```
+
+## flashing a bootable NVMe image directly
+
+`disko.devices.disk.nvme0` (`nix/nixos/disko-disk-config.nix`) targets
+`/dev/nvme0n1` — the whole disk, GPT + FIRMWARE/ESP partitions + a ZFS root
+pool. Instead of booting the Pi from an SD card and installing over the
+network, you can build a `.raw` image of that same layout on this machine and
+`dd` it straight onto the NVMe drive (pull it out of the HAT, e.g. via a
+USB-NVMe enclosure, before flashing).
+
+This uses [disko's image-building support](https://github.com/nix-community/disko/blob/master/docs/disko-images.md):
+disko boots a throwaway `aarch64-linux` VM (via qemu, under the same
+`binfmt`/emulation as the regular build above — see
+`disko.imageBuilder.enableBinfmt` in `flake.nix`) to partition, format, and
+install into a virtual disk file of a fixed size.
+
+Because the image is virtual, `disko.devices.disk.nvme0.imageSize` (currently
+`440G`) has to be set explicitly and fit under your drive's *actual* usable
+capacity — a "500GB" drive is usually ~465 GiB usable. Bump it in
+`nix/nixos/disko-disk-config.nix` if your drive is bigger, or the build will
+fail with the image too small to fit the ZFS pool.
+
+Build the installer script (recommended — runs outside the nix store, faster
+to get the final image than the pure-sandbox `diskoImages` variant):
+
+```
+nix build .#nixosConfigurations.flybrain-rpi5.config.system.build.diskoImagesScript
+sudo ./result --build-memory 4096
+```
+
+This drops `nvme0.raw` in the current directory once it finishes (expect the
+qemu build + VM run to take a while under emulation — qemu itself isn't
+cached for this niche `-host-cpu-only` variant, so it compiles from source
+the first time).
+
+Then flash it onto the NVMe drive. **Double-check the device node** — `dd` to
+the wrong disk is unrecoverable:
+
+```
+lsblk                          # find the NVMe drive, NOT your normal disk
+sudo dd if=nvme0.raw of=/dev/sdX bs=4M status=progress conv=fsync
+sync
+```
+
+Put the drive back in the HAT, boot the Pi5 (PCIe/NVMe boot is already
+enabled via `pciex1`/`pciex1_gen` in `nix/nixos/rpi5-configtxt.nix`), and it
+should come up with SSH already reachable using the key baked into
+`flake.nix` (`services.openssh.enable` + `users.users.root.openssh.authorizedKeys.keys`).
+
+If it doesn't boot from NVMe on its own, check the Pi5's EEPROM boot order
+(`rpi-eeprom-config`) — NVMe should already be in the default order on
+current firmware, but it can be overridden.
 
 # dev utils
 

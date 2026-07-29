@@ -5,7 +5,7 @@ let
     # label = "FIRMWARE";
     priority = 1;
 
-    type = "0700";  # Microsoft basic data
+    type = "0700"; # Microsoft basic data
     attributes = [
       0 # Required Partition
     ];
@@ -27,7 +27,7 @@ let
   espPartition = lib.recursiveUpdate {
     # label = "ESP";
 
-    type = "EF00";  # EFI System Partition (ESP)
+    type = "EF00"; # EFI System Partition (ESP)
     attributes = [
       2 # Legacy BIOS Bootable, for U-Boot to find extlinux config
     ];
@@ -47,9 +47,11 @@ let
     };
   };
 
-in {
+in
+{
 
   boot.supportedFilesystems = [ "zfs" ];
+  boot.zfs.forceImportRoot = false;
   # networking.hostId is set somewhere else
   services.zfs.autoScrub.enable = true;
   services.zfs.trim.enable = true;
@@ -58,6 +60,15 @@ in {
     disk.nvme0 = {
       type = "disk";
       device = "/dev/nvme0n1";
+      # Only used when building a flashable .raw image via
+      # `disko.devices.disk.nvme0.imageName`/`system.build.diskoImages`
+      # (nix build .#nixosConfigurations.flybrain-rpi5.config.system.build.diskoImages).
+      # Not used for a live install (e.g. via nixos-anywhere), where disko
+      # partitions the real device and "100%" below means the whole disk.
+      # Keep this comfortably under your NVMe's real capacity (a "500GB"
+      # drive is usually ~465 GiB usable) and bump it if the build fails
+      # because the image is too small.
+      imageSize = "440G";
       content = {
         type = "gpt";
         partitions = {
@@ -82,7 +93,7 @@ in {
 
         };
       };
-    };  #nvme0
+    }; # nvme0
 
     zpool = {
       rpool = {
@@ -91,7 +102,7 @@ in {
         # zpool properties
         options = {
           ashift = "12";
-          autotrim = "on";  # see also services.zfs.trim.enable
+          autotrim = "on"; # see also services.zfs.trim.enable
         };
 
         # zfs properties
@@ -109,9 +120,11 @@ in {
           canmount = "off";
         };
 
-        postCreateHook = let
-          poolName = "rpool";
-        in "zfs list -t snapshot -H -o name | grep -E '^${poolName}@blank$' || zfs snapshot ${poolName}@blank";
+        postCreateHook =
+          let
+            poolName = "rpool";
+          in
+          "zfs list -t snapshot -H -o name | grep -E '^${poolName}@blank$' || zfs snapshot ${poolName}@blank";
 
         datasets = {
 
@@ -124,9 +137,9 @@ in {
             type = "zfs_fs";
             options = {
               reservation = "128M";
-              mountpoint = "legacy";  # to manage "with traditional tools"
+              mountpoint = "legacy"; # to manage "with traditional tools"
             };
-            mountpoint = "/nix";  # nixos configuration mountpoint
+            mountpoint = "/nix"; # nixos configuration mountpoint
           };
 
           # _system_ data
