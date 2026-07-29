@@ -1,15 +1,28 @@
 {
   nixConfig = {
-    extra-substituters = [ "https://ros.cachix.org" ];
-    extra-trusted-public-keys = [ "ros.cachix.org-1:dSyZxI8geDCJrwgvCOHDoAfOm5sV1wCPjBkKL+38Rvo=" ];
+    extra-substituters = [ "https://ros.cachix.org" "https://nixos-raspberrypi.cachix.org" ];
+    extra-trusted-public-keys = [ "ros.cachix.org-1:dSyZxI8geDCJrwgvCOHDoAfOm5sV1wCPjBkKL+38Rvo=" "nixos-raspberrypi.cachix.org-1:4iMO9LXa8BqhU+Rpg6LQKiGa2lsNh/j2oiYLNOQ5sPI=" ];
   };
 
   inputs = {
+    nixos-raspberrypi.url = "github:nvmd/nixos-raspberrypi/main";
+
+    disko = {
+      url = "github:nix-community/disko";
+      inputs.nixpkgs.follows = "nixos-raspberrypi/nixpkgs";
+    };
+
+
+
     nix-ros-overlay.url = "github:lopsided98/nix-ros-overlay/develop";
-    nixpkgs.follows = "nix-ros-overlay/nixpkgs"; # IMPORTANT!!!
+    nix-ros-overlay.inputs.nixpkgs.follows = "nixos-raspberrypi/nixpkgs";
+  
+    nixpkgs.follows = "nixos-raspberrypi/nixpkgs"; # IMPORTANT!!!
     nixgl.url = "github:nix-community/nixGL";
+  
     nix2container-src.url = "github:nlewo/nix2container";
     nix2container-src.flake = false;
+      
   };
   outputs =
     {
@@ -18,8 +31,11 @@
       nixpkgs,
       nixgl,
       nix2container-src,
+      nixos-raspberrypi,
+      disko,
       ...
-    }:
+    }@inputs:
+
     nix-ros-overlay.inputs.flake-utils.lib.eachDefaultSystem (
       system:
       let
@@ -131,10 +147,31 @@
             )
           ];
         };
-
-        legacyPackages = pkgs;
+        
         formatter = pkgs.nixfmt-tree;
-      }
-    );
+        legacyPackages = pkgs;
 
+        
+      }
+    ) //
+    { nixosConfigurations  = {
+        flybrain-rpi5 = nixos-raspberrypi.lib.nixosSystemFull {
+          specialArgs = inputs;
+
+          modules = [
+            ({ nixos-raspberrypi, ... }: {
+              imports = with nixos-raspberrypi.nixosModules; [
+                raspberry-pi-5.base
+                raspberry-pi-5.page-size-16k
+              ];
+            })
+            { networking.hostId = "8821e309"; } # NOTE: for zfs, must be unique
+            disko.nixosModules.disko
+            ./nix/nixos/rpi5-configtxt.nix
+            ./nix/nixos/disko-disk-config.nix
+          ];
+        };
+      };
+
+    };
 }
