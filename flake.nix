@@ -269,7 +269,7 @@
           '';
           packages = [
             pkgs.colcon
-            # pkgs.nixgl.auto.nixGLDefault
+            pkgs.nixgl.auto.nixGLDefault
             pkgs.px4-gazebo-models
             pkgs.qgroundcontrol
             pkgs.micro-xrce-dds-agent
