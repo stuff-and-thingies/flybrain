@@ -3,10 +3,12 @@
     extra-substituters = [
       "https://ros.cachix.org"
       "https://nixos-raspberrypi.cachix.org"
+      "https://rcmast3r.cachix.org"
     ];
     extra-trusted-public-keys = [
       "ros.cachix.org-1:dSyZxI8geDCJrwgvCOHDoAfOm5sV1wCPjBkKL+38Rvo="
       "nixos-raspberrypi.cachix.org-1:4iMO9LXa8BqhU+Rpg6LQKiGa2lsNh/j2oiYLNOQ5sPI="
+      "rcmast3r.cachix.org-1:dH22dF877RZ1j7uvAgqnQWNChxdQDeqgBRWpXzoi84c="
     ];
   };
 
@@ -21,7 +23,8 @@
     nix-ros-overlay.url = "github:lopsided98/nix-ros-overlay/develop";
     nix-ros-overlay.inputs.nixpkgs.follows = "nixos-raspberrypi/nixpkgs";
 
-    nixpkgs.follows = "nixos-raspberrypi/nixpkgs"; # IMPORTANT!!!
+    nixpkgs.follows = "nixos-raspberrypi/nixpkgs";
+
     nixgl.url = "github:nix-community/nixGL";
 
     nix2container-src.url = "github:nlewo/nix2container";
@@ -42,7 +45,19 @@
     let
       pkgs-overlays = [
         nix-ros-overlay.overlays.default
-        nixgl.overlay
+
+        # nixgl.overlay unconditionally sets enable32bits = true on
+        # x86_64-linux, which pulls in pkgsi686Linux.mesa/intel-media-driver
+        # (32-bit OpenGL/Vulkan/VA-API, needed for things like Steam/Proton).
+        # We only wrap 64-bit programs (gz sim, QGroundControl), so build
+        # nixgl ourselves with 32-bit support disabled to avoid an
+        # unnecessary from-source i686 build (rust-bindgen/wayland/mesa).
+        (final: _prev: {
+          nixgl = import "${nixgl}/default.nix" {
+            pkgs = final;
+            enable32bits = false;
+          };
+        })
 
         # Work around a CPython bug that only manifests when scripts built by
         # `pkgs.writers.writePython3`/`writePython3Bin` (e.g. nixpkgs'
@@ -105,6 +120,19 @@
           });
         })
 
+        # gjs's "Debugger" test group (delete/finish/frame/step/... commands)
+        # attaches to a running interpreter to drive it, which needs
+        # capabilities (ptrace-like control, a real pty) the nix build
+        # sandbox doesn't provide, so 25 of 77 tests fail even though gjs
+        # itself is fine. Pulled in transitively (e.g. by librsvg/appstream/
+        # gnome icon theming) as a from-source build, so skip its checkPhase
+        # rather than patching upstream's tests.
+        (final: prev: {
+          gjs = prev.gjs.overrideAttrs (_old: {
+            doCheck = false;
+          });
+        })
+
         # trio's test suite assumes a real network stack: it checks concrete
         # SO_PROTOCOL values (`assert 14 in [42, 1]`), binds a real local
         # address, and execs a subprocess via `/dev/fd/0`. None of that holds
@@ -142,6 +170,15 @@
               # mismatch above). Not worth 7 more minutes of test runtime
               # for one environment-specific assertion.
               django = pyPrev.django.overrideAttrs (_old: {
+                doCheck = false;
+                doInstallCheck = false;
+              });
+              # rich's test_brokenpipeerror asserts a specific process exit
+              # code after writing to a closed stdout pipe (SIGPIPE-driven
+              # behavior); this comes out differently under the build
+              # sandbox, same root-cause category as the other overrides
+              # here. 1 of 951+ tests fails.
+              rich = pyPrev.rich.overrideAttrs (_old: {
                 doCheck = false;
                 doInstallCheck = false;
               });
@@ -232,7 +269,7 @@
           '';
           packages = [
             pkgs.colcon
-            pkgs.nixgl.auto.nixGLDefault
+            # pkgs.nixgl.auto.nixGLDefault
             pkgs.px4-gazebo-models
             pkgs.qgroundcontrol
             pkgs.micro-xrce-dds-agent
