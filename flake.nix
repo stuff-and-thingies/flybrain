@@ -13,6 +13,7 @@
   };
 
   inputs = {
+
     nixos-raspberrypi.url = "github:nvmd/nixos-raspberrypi/develop";
 
     disko = {
@@ -26,6 +27,7 @@
     nixpkgs.follows = "nixos-raspberrypi/nixpkgs";
 
     nixgl.url = "github:nix-community/nixGL";
+    nixgl.inputs.nixpkgs.follows = "nixos-raspberrypi/nixpkgs";
 
     nix2container-src.url = "github:nlewo/nix2container";
     nix2container-src.flake = false;
@@ -74,7 +76,8 @@
         # `ModuleNotFoundError`. Explicitly setting PYTHONHOME to the env's own
         # store path sidesteps the broken self-location and fixes this for every
         # writePython3(Bin)-produced tool, not just this one.
-        (final: prev:
+        (
+          final: prev:
           let
             fixPythonWriter =
               origWriter: name: attrs: content:
@@ -129,6 +132,161 @@
         # rather than patching upstream's tests.
         (final: prev: {
           gjs = prev.gjs.overrideAttrs (_old: {
+            doCheck = false;
+          });
+        })
+
+        # systemd's own meson.build does
+        # `pymod.find_installation('python3', modules: ['jinja2', ...])`
+        # against a `buildPackages.python3Packages.python.withPackages` env,
+        # hitting the same QEMU self-location bug described above for
+        # gobject-introspection/virglrenderer: it reports jinja2 (and lxml)
+        # as missing even though they're right there in the env's
+        # site-packages. This is a hard configure-time failure (not a test),
+        # and systemd sits under nearly everything in this closure, so fix it
+        # the same way as virglrenderer - except a bare `PYTHONHOME = "...";`
+        # derivation attribute silently does nothing here: systemd builds
+        # with `__structuredAttrs = true`, and under structuredAttrs nixpkgs'
+        # generic setup.sh only `declare`s arbitrary custom attrs as local
+        # shell variables, it doesn't `export` them (confirmed via
+        # `nix print-dev-env`: every other var gets a paired `export FOO`
+        # line, PYTHONHOME didn't), so python3 subprocesses never actually
+        # saw it. Export it explicitly via preConfigure instead. Also drop
+        # the original (unwrapped) python3.withPackages entry from
+        # nativeBuildInputs so there's only one `python3` on PATH for
+        # meson's find_installation to resolve to. nixpkgs builds
+        # `systemdMinimal` and `systemdLibs` via `systemd.override {...}`,
+        # so all three top-level attrs need the fix applied individually.
+        (
+          final: prev:
+          let
+            fixSystemdPython =
+              drv:
+              drv.overrideAttrs (
+                old:
+                let
+                  pythonEnv = prev.buildPackages.python3Packages.python.withPackages (
+                    ps: with ps; [
+                      lxml
+                      jinja2
+                      pyelftools
+                      pefile
+                    ]
+                  );
+                  isOldPythonEnv =
+                    p: prev.lib.hasPrefix "python3-" (p.name or "") && prev.lib.hasSuffix "-env" (p.name or "");
+                in
+                {
+                  nativeBuildInputs = (prev.lib.filter (p: !(isOldPythonEnv p)) (old.nativeBuildInputs or [ ])) ++ [
+                    pythonEnv
+                  ];
+                  PYTHONHOME = "${pythonEnv}";
+                  preConfigure = ''
+                    export PYTHONHOME="${pythonEnv}"
+                    ${old.preConfigure or ""}
+                  '';
+                }
+              );
+          in
+          {
+            systemd = fixSystemdPython prev.systemd;
+            systemdMinimal = fixSystemdPython prev.systemdMinimal;
+            systemdLibs = fixSystemdPython prev.systemdLibs;
+          }
+        )
+
+        # sdl3's ctest suite is otherwise clean (24/25 pass) except
+        # `testprocess`, which spawns child processes and checks their
+        # inherited stdio/environment/exit codes - subprocess semantics that
+        # behave differently under the nix build sandbox + QEMU user-mode
+        # emulation. Pulled in transitively (e.g. by qemu itself), so skip
+        # its checkPhase rather than patching upstream's tests.
+        (final: prev: {
+          sdl3 = prev.sdl3.overrideAttrs (_old: {
+            doCheck = false;
+          });
+        })
+
+        # e2fsprogs' test suite is otherwise clean (390/392 pass) except
+        # `m_rootdir`/`m_minrootdir`, which build an ext4 image from a
+        # sample directory tree and compare it against a golden checksum -
+        # sensitive to file metadata (ownership/permissions/timestamps) that
+        # the nix build sandbox doesn't reproduce identically to upstream's
+        # fixture environment. Skip its checkPhase rather than patching
+        # upstream's test fixtures.
+        (final: prev: {
+          e2fsprogs = prev.e2fsprogs.overrideAttrs (_old: {
+            doCheck = false;
+          });
+        })
+
+        # tpm2-tss's installCheckPhase runs its full integration test suite
+        # against a TPM (real or swtpm-simulated) that isn't available in the
+        # nix build sandbox, failing every test/integration/*.int case. Pulled
+        # in transitively (e.g. by qemu's TPM support), so skip its
+        # installCheckPhase rather than patching upstream's tests.
+        (final: prev: {
+          tpm2-tss = prev.tpm2-tss.overrideAttrs (_old: {
+            doInstallCheck = false;
+          });
+        })
+
+        # gssdp's and gupnp's test suites join a real multicast group
+        # (239.255.255.250, SSDP) on a real network device, which the nix
+        # build sandbox doesn't provide ("Failed to join group ...: No such
+        # device"), aborting several tests in each. Pulled in transitively
+        # (e.g. by gst-plugins-bad), so skip their checkPhases rather than
+        # patching upstream's tests. Note nixpkgs keeps both an older
+        # top-level `gssdp`/`gupnp` (1.4.x, needed elsewhere) and the newer
+        # `gssdp_1_6`/`gupnp_1_6` actually pulled in here - the fix has to
+        # target the `_1_6` attrs.
+        (final: prev: {
+          gssdp_1_6 = prev.gssdp_1_6.overrideAttrs (_old: {
+            doCheck = false;
+          });
+          gupnp_1_6 = prev.gupnp_1_6.overrideAttrs (_old: {
+            doCheck = false;
+          });
+        })
+
+        # libical-glib's installCheckPhase ctest suite runs PyGObject-based
+        # regression tests (`import gi`) through the same kind of
+        # `python3.withPackages` wrapper env as gobject-introspection above,
+        # hitting the identical QEMU self-location bug: `gi` is right there
+        # in the env's site-packages, but sys.path resolves to the base
+        # interpreter's instead. Pulled in transitively (e.g. by gst-plugins-
+        # bad's rtsp support via libical's use in some CalDAV/iCal bits), so
+        # skip its installCheckPhase rather than patching upstream's tests.
+        (final: prev: {
+          libical = prev.libical.overrideAttrs (_old: {
+            doInstallCheck = false;
+          });
+        })
+
+        # polkit's test suite runs test/wrapper.py through a
+        # `python3.withPackages` env (providing dbus-python/dbusmock) whose
+        # shebang is invoked directly, hitting the same QEMU self-location
+        # bug described above for gobject-introspection: sys.path resolves
+        # to the base interpreter's site-packages instead of the wrapper
+        # env's, so `import dbus` fails even though dbus-python is right
+        # there in the closure. Skip its checkPhase rather than patching
+        # upstream's test runner.
+        (final: prev: {
+          polkit = prev.polkit.overrideAttrs (_old: {
+            doCheck = false;
+          });
+        })
+
+        # swtpm's test suite spawns real swtpm processes and waits on them to
+        # write pidfiles over control sockets ("Socket TPM did not write
+        # pidfile", "CMD_SET_DATAFD failed: Connecting to server"). Under
+        # QEMU user-mode emulation the socket/process timing this depends on
+        # doesn't hold up, so most of the suite fails even though swtpm
+        # itself builds and works fine. It's pulled in transitively (e.g. by
+        # qemu, for TPM device emulation), so skip its checkPhase rather than
+        # patching upstream's tests.
+        (final: prev: {
+          swtpm = prev.swtpm.overrideAttrs (_old: {
             doCheck = false;
           });
         })
@@ -201,7 +359,85 @@
             doCheck = false;
           });
         })
-
+        # virglrenderer's src/gallium/meson.build does
+        # `pymod.find_installation('python3', modules: ['yaml'])`, which
+        # spawns python3 and actually tries `import yaml`. pyyaml is a
+        # genuine input here (via buildPackages.python3.withPackages), but
+        # under QEMU user-mode emulation (building this aarch64-linux system
+        # via binfmt on an x86_64 host) CPython's self-location gets
+        # confused the same way described in the writePython3(Bin) fix
+        # above, and it silently falls back to the base interpreter's
+        # site-packages - so the yaml module check fails even though pyyaml
+        # is present in the closure. Setting PYTHONHOME explicitly (as a
+        # real build-time env var, since this python3 isn't invoked through
+        # a wrapper script the way writePython3 output is) sidesteps the
+        # same self-location bug here.
+        (final: prev: {
+          virglrenderer = prev.virglrenderer.overrideAttrs (
+            _old:
+            let
+              pythonEnv = prev.buildPackages.python3.withPackages (ps: [
+                ps.pyyaml
+              ]);
+            in
+            {
+              nativeBuildInputs = [
+                prev.meson
+                prev.ninja
+                prev.pkg-config
+                pythonEnv
+              ];
+              PYTHONHOME = "${pythonEnv}";
+            }
+          );
+        })
+        # gobject-introspection's g-ir-scanner (and g-ir-compiler/g-ir-generate)
+        # are plain python scripts whose shebang points at a
+        # `python3.withPackages` env (providing mako/markdown/setuptools).
+        # Under the same QEMU user-mode self-location bug described above,
+        # invoking them directly - as every g-ir-scanner caller does, e.g.
+        # gst-plugins-base's meson build - resolves sys.path to the *base*
+        # interpreter's site-packages, which lacks setuptools. Since Python
+        # 3.12 dropped distutils from the stdlib and giscanner unconditionally
+        # does `import distutils.cygwinccompiler` at module scope, this
+        # surfaces as `ModuleNotFoundError: No module named 'distutils'`
+        # (setuptools vendors a distutils shim, but only once its
+        # site-packages is actually found). Unlike the writePython3(Bin) and
+        # virglrenderer fixes above, we don't control the callers here -
+        # dozens of packages invoke g-ir-scanner during their own builds - so
+        # fix it once by baking PYTHONHOME into the tool itself.
+        #
+        # gobject-introspection's *own* meson.build hits the same bug a step
+        # earlier: it does `pymod.find_installation('python3', modules:
+        # ['mako','markdown','setuptools'])`, which spawns that same
+        # python3.withPackages env directly during its configure phase, so
+        # the self-location confusion makes it report setuptools as missing
+        # before the package even builds. Set PYTHONHOME as a real build-time
+        # env var (same fix as virglrenderer) to cover that too.
+        (
+          final: prev:
+          let
+            girPythonEnv = prev.python3.withPackages (ps: [
+              ps.mako
+              ps.markdown
+              ps.setuptools
+            ]);
+          in
+          {
+            gobject-introspection-unwrapped = prev.gobject-introspection-unwrapped.overrideAttrs (old: {
+              nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ prev.makeWrapper ];
+              PYTHONHOME = "${girPythonEnv}";
+              postFixup = ''
+                ${old.postFixup or ""}
+                for f in g-ir-scanner g-ir-compiler g-ir-generate; do
+                  if [ -x "$dev/bin/$f" ]; then
+                    wrapProgram "$dev/bin/$f" --set PYTHONHOME "${girPythonEnv}"
+                  fi
+                done
+              '';
+            });
+          }
+        )
         (final: prev: {
           px4-gazebo-models = prev.callPackage ./nix/px4-gazebo.nix { };
           nix2container = (prev.callPackage nix2container-src { pkgs = prev; }).nix2container;
@@ -324,7 +560,6 @@
 
           modules = [
             ({ nixos-raspberrypi, ... }: {
-              nixpkgs.overlays = pkgs-overlays;
               imports = with nixos-raspberrypi.nixosModules; [
                 raspberry-pi-5.base
                 # raspberry-pi-5.page-size-16k
@@ -334,6 +569,7 @@
               networking.hostId = "8821e309";
             } # NOTE: for zfs, must be unique
             ({ lib, ... }: {
+              nixpkgs.overlays = pkgs-overlays;
               boot.loader.raspberry-pi.bootloader = "kernel";
               system.stateVersion = "26.05";
             })

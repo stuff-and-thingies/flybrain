@@ -49,7 +49,6 @@ let
 
 in
 {
-
   boot.supportedFilesystems = [ "zfs" ];
   boot.zfs.forceImportRoot = false;
   # networking.hostId is set somewhere else
@@ -155,36 +154,6 @@ in
               mountpoint = "legacy";
             };
             mountpoint = "/";
-          };
-          "system/var" = {
-            type = "zfs_fs";
-            options = {
-              mountpoint = "legacy";
-            };
-            mountpoint = "/var";
-          };
-
-          # _user_ and _user service_ data. safest, long retention policy
-          safe = {
-            type = "zfs_fs";
-            options = {
-              copies = "2";
-              mountpoint = "none";
-            };
-          };
-          "safe/home" = {
-            type = "zfs_fs";
-            options = {
-              mountpoint = "legacy";
-            };
-            mountpoint = "/home";
-          };
-          "safe/var/lib" = {
-            type = "zfs_fs";
-            options = {
-              mountpoint = "legacy";
-            };
-            mountpoint = "/var/lib";
           };
 
         };
