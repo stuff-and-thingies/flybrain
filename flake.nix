@@ -4,11 +4,13 @@
       "https://ros.cachix.org"
       "https://nixos-raspberrypi.cachix.org"
       "https://rcmast3r.cachix.org"
+      "http://neb-cache.yeet/neb-cache"
     ];
     extra-trusted-public-keys = [
       "ros.cachix.org-1:dSyZxI8geDCJrwgvCOHDoAfOm5sV1wCPjBkKL+38Rvo="
       "nixos-raspberrypi.cachix.org-1:4iMO9LXa8BqhU+Rpg6LQKiGa2lsNh/j2oiYLNOQ5sPI="
       "rcmast3r.cachix.org-1:dH22dF877RZ1j7uvAgqnQWNChxdQDeqgBRWpXzoi84c="
+      "neb-cache:KTaVU/xOSztooic5m8ZrvvP/5lp3Lg3Y/P7NUyZtKII="
     ];
   };
 
