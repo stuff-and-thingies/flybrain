@@ -311,12 +311,15 @@ docker run -d \
     --name "${BRIDGE_CONTAINER}" \
     --network host \
     -e GZ_PARTITION="${GZ_PARTITION}" \
+    -e PX4_GZ_WORLD="${SIM_WORLD}" \
     "${BRIDGE_IMAGE}" \
     bash -lc '
         source /opt/ros/jazzy/setup.bash
+        sed "s|/world/aruco/|/world/${PX4_GZ_WORLD}/|g" \
+            /flybrain/gz_bridge.yaml > /tmp/flybrain_gz_bridge.yaml
         exec ros2 run ros_gz_bridge parameter_bridge \
             --ros-args \
-            -p config_file:=/flybrain/gz_bridge.yaml
+            -p config_file:=/tmp/flybrain_gz_bridge.yaml
     ' \
     >/dev/null
 

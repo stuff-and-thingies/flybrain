@@ -76,12 +76,10 @@
                   sha256 = "sha256-MNSg53u3i5MoxG99XzkcqhExuNY3Xvhe8Z8NxyrTLP4=";
                 };
 
-                config = 
+                config =
                   let
-                    app = pkgs.writeScript "entry" (
-                      builtins.readFile ./px4-entrypoint.sh
-                    );
-                  in 
+                    app = pkgs.writeScript "entry" (builtins.readFile ./px4-entrypoint.sh);
+                  in
                   {
                     entrypoint = [ app ];
 
@@ -113,8 +111,11 @@
             export FLYBRAIN_PX4_GZ_WORLDS="${pkgs.px4-gazebo-models}/worlds"
             export FLYBRAIN_PX4_GZ_SERVER_CONFIG="${pkgs.px4-gazebo-models}/server.config"
             export FLYBRAIN_GZ_BRIDGE_IMAGE="flybrain-ros-gz-harmonic-bridge:dev"
+            export FLYBRAIN_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
             export GZ_SIM_RESOURCE_PATH="$FLYBRAIN_PX4_GZ_MODELS:$FLYBRAIN_PX4_GZ_WORLDS''${GZ_SIM_RESOURCE_PATH:+:$GZ_SIM_RESOURCE_PATH}"
             export GZ_SIM_SERVER_CONFIG_PATH="''${GZ_SIM_SERVER_CONFIG_PATH:-$FLYBRAIN_PX4_GZ_SERVER_CONFIG}"
+
+            export FLYBRAIN_GZ_CMD="''${FLYBRAIN_GZ_CMD:-nixGL gz}"
 
             ensure-gz-bridge() {
               if ! command -v docker >/dev/null 2>&1; then
@@ -130,7 +131,7 @@
               docker image inspect "$FLYBRAIN_GZ_BRIDGE_IMAGE" >/dev/null 2>&1 \
                 || docker build \
                   -t "$FLYBRAIN_GZ_BRIDGE_IMAGE" \
-                  docker/ros-gz-harmonic-bridge
+                  "$FLYBRAIN_ROOT/docker/ros-gz-harmonic-bridge"
             }
 
             alias start-sih-sitl='docker image inspect px4-sitl:${pkgs.px4-sitl.imageTag} >/dev/null 2>&1 \
@@ -141,9 +142,46 @@
 
             alias build-gz-bridge='docker build \
               -t "$FLYBRAIN_GZ_BRIDGE_IMAGE" \
-              docker/ros-gz-harmonic-bridge'
+              "$FLYBRAIN_ROOT/docker/ros-gz-harmonic-bridge"'
 
-            alias start-sim-host-gz='./scripts/start-sim-host-gz.sh "$FLYBRAIN_PX4_GZ_IMAGE"'
+            start-sim-gz-nix() {
+              if ! command -v docker >/dev/null 2>&1; then
+                echo "error: docker not found" >&2
+                return 1
+              fi
+
+              if ! docker info >/dev/null 2>&1; then
+                echo "error: docker daemon unavailable or current user cannot access it" >&2
+                return 1
+              fi
+
+              ensure-gz-bridge || return
+
+              if ! docker image inspect "$FLYBRAIN_PX4_GZ_IMAGE" >/dev/null 2>&1; then
+                "$FLYBRAIN_PX4_GZ_COPY" || return
+              fi
+
+              "$FLYBRAIN_ROOT/scripts/start-sim-gz.sh" "$FLYBRAIN_PX4_GZ_IMAGE" "$@"
+            }
+
+            start-sim-gz-native() {
+              FLYBRAIN_GZ_NATIVE=1 start-sim-gz-nix "$@"
+            }
+
+            generate-aruco-world() {
+              python "$FLYBRAIN_ROOT/scripts/generate-aruco-world.py" "$@"
+            }
+
+            start-sim-gz-aruco-multi-nix() {
+              PX4_GZ_WORLD=aruco_multi \
+                FLYBRAIN_PX4_GZ_WORLDS="$FLYBRAIN_ROOT/sim/worlds" \
+                GZ_SIM_RESOURCE_PATH="$FLYBRAIN_ROOT/sim/models:$GZ_SIM_RESOURCE_PATH" \
+                start-sim-gz-nix "$@"
+            }
+
+            start-sim-gz-aruco-multi-native() {
+              FLYBRAIN_GZ_NATIVE=1 start-sim-gz-aruco-multi-nix "$@"
+            }
 
             ensure-gz-bridge
           '';
@@ -153,6 +191,7 @@
             pkgs.px4-gazebo-models
             pkgs.qgroundcontrol
             pkgs.micro-xrce-dds-agent
+            (pkgs.python3.withPackages (ps: [ ps.opencv4 ]))
             pkgs.px4-sitl.copyToDockerDaemon
             pkgs.px4-sitl-gazebo.copyToDockerDaemon
 
