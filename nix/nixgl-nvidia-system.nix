@@ -129,13 +129,26 @@ writeShellScriptBin "nixGL" ''
         # bind-mounts over /usr/lib64/lib*nvidia* for this process tree
         # only, leaving the real system (other processes already using
         # the GPU, e.g. the desktop compositor) completely untouched.
+        #
+        # The outer namespace has to be mapped to root (map-root-user) to
+        # be allowed to do that bind mount at all, but that leaves the
+        # real command running with getuid()==0 - which some GUI apps
+        # (QGroundControl in particular) refuse to start under, since
+        # they think they're actually running as root. Once the mounts
+        # are done, re-enter a second, unprivileged user namespace mapped
+        # back to the real caller's uid/gid before exec'ing the real
+        # command. Only --user is unshared again here, not --mount, so
+        # the bind mounts made above stay visible.
+        real_uid="$(id -u)"
+        real_gid="$(id -g)"
         exec unshare --user --mount --map-root-user bash -c '
           for f in "${nvidiaUserspace}"/lib/*; do
             b="/usr/lib64/$(basename "$f")"
             [ -f "$b" ] && [ -f "$f" ] && mount --bind "$f" "$b"
           done
-          exec "$@"
-        ' bash "$@"
+          real_uid="$1"; real_gid="$2"; shift 2
+          exec unshare --user --map-user="$real_uid" --map-group="$real_gid" -- "$@"
+        ' bash "$real_uid" "$real_gid" "$@"
       ''
     else
       ''exec "$@"''
