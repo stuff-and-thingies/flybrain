@@ -23,12 +23,42 @@
     nix-ros-overlay.inputs.flake-utils.lib.eachDefaultSystem (
       system:
       let
+        # The host's installed NVIDIA driver version, re-detected on every
+        # eval (this flake already requires --impure) so a real,
+        # version-matched nix-native copy of the userspace driver can be
+        # built from the official installer (see nixgl-nvidia-system.nix).
+        # `time = builtins.currentTime` forces the derivation to actually
+        # re-run `cp` each eval rather than reusing a stale store path -
+        # builtins.readFile can't read /proc files directly (they report
+        # size 0, which Nix treats as empty; see nix#3539), so the version
+        # has to be copied out to a normal file first. Null (falls back to
+        # symlinking the host's /usr/lib64 driver files directly at
+        # devshell runtime) if no NVIDIA driver is loaded at all.
+        nvidiaVersion =
+          let
+            versionFile =
+              nixpkgs.legacyPackages.${system}.runCommand "flybrain-nvidia-version-file"
+                {
+                  time = builtins.currentTime;
+                  preferLocalBuild = true;
+                  allowSubstitutes = false;
+                }
+                "cp /proc/driver/nvidia/version $out 2>/dev/null || touch $out";
+            match = builtins.match ".*Kernel Module.*  ([0-9]+\\.[0-9]+\\.[0-9]+)  .*" (
+              builtins.readFile versionFile
+            );
+          in
+          if match != null then builtins.head match else null;
+
         pkgs = import nixpkgs {
           inherit system;
+          config.allowUnfree = true;
           overlays = [
             nix-ros-overlay.overlays.default
             nixgl.overlay
             (final: prev: {
+              nixgl-nvidia-system = final.callPackage ./nix/nixgl-nvidia-system.nix { inherit nvidiaVersion; };
+
               px4-gazebo-models = prev.callPackage ./nix/px4-gazebo.nix { };
               nix2container = (prev.callPackage nix2container-src { pkgs = prev; }).nix2container;
 
@@ -97,27 +127,32 @@
           ];
         };
 
-      in
-      {
-        devShells.default = pkgs.mkShell {
-          name = "sim-env";
-          NIXPKGS_ALLOW_UNFREE = 1;
-          shellHook = ''
-            alias qcntrl='nixGL QGroundControl'
+        # The GUI/GL wrapper is the only thing that differs between GPU
+        # vendors; everything else about the sim devshell is shared.
+        mkSimShell =
+          {
+            gzWrapperPkg,
+            gzWrapperCmd,
+          }:
+          pkgs.mkShell {
+            name = "sim-env";
+            NIXPKGS_ALLOW_UNFREE = 1;
+            shellHook = ''
+              alias qcntrl='${gzWrapperCmd} QGroundControl'
 
-            export FLYBRAIN_PX4_GZ_IMAGE="px4-sitl-gazebo:${pkgs.px4-sitl-gazebo.imageTag}"
-            export FLYBRAIN_PX4_GZ_COPY="${pkgs.px4-sitl-gazebo.copyToDockerDaemon}/bin/copy-to-docker-daemon"
-            export FLYBRAIN_PX4_GZ_MODELS="${pkgs.px4-gazebo-models}/models"
-            export FLYBRAIN_PX4_GZ_WORLDS="${pkgs.px4-gazebo-models}/worlds"
-            export FLYBRAIN_PX4_GZ_SERVER_CONFIG="${pkgs.px4-gazebo-models}/server.config"
-            export FLYBRAIN_GZ_BRIDGE_IMAGE="flybrain-ros-gz-harmonic-bridge:dev"
-            export FLYBRAIN_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-            export GZ_SIM_RESOURCE_PATH="$FLYBRAIN_PX4_GZ_MODELS:$FLYBRAIN_PX4_GZ_WORLDS''${GZ_SIM_RESOURCE_PATH:+:$GZ_SIM_RESOURCE_PATH}"
-            export GZ_SIM_SERVER_CONFIG_PATH="''${GZ_SIM_SERVER_CONFIG_PATH:-$FLYBRAIN_PX4_GZ_SERVER_CONFIG}"
+              export FLYBRAIN_PX4_GZ_IMAGE="px4-sitl-gazebo:${pkgs.px4-sitl-gazebo.imageTag}"
+              export FLYBRAIN_PX4_GZ_COPY="${pkgs.px4-sitl-gazebo.copyToDockerDaemon}/bin/copy-to-docker-daemon"
+              export FLYBRAIN_PX4_GZ_MODELS="${pkgs.px4-gazebo-models}/models"
+              export FLYBRAIN_PX4_GZ_WORLDS="${pkgs.px4-gazebo-models}/worlds"
+              export FLYBRAIN_PX4_GZ_SERVER_CONFIG="${pkgs.px4-gazebo-models}/server.config"
+              export FLYBRAIN_GZ_BRIDGE_IMAGE="flybrain-ros-gz-harmonic-bridge:dev"
+              export FLYBRAIN_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+              export GZ_SIM_RESOURCE_PATH="$FLYBRAIN_PX4_GZ_MODELS:$FLYBRAIN_PX4_GZ_WORLDS''${GZ_SIM_RESOURCE_PATH:+:$GZ_SIM_RESOURCE_PATH}"
+              export GZ_SIM_SERVER_CONFIG_PATH="''${GZ_SIM_SERVER_CONFIG_PATH:-$FLYBRAIN_PX4_GZ_SERVER_CONFIG}"
 
-            export FLYBRAIN_GZ_CMD="''${FLYBRAIN_GZ_CMD:-nixGL gz}"
+              export FLYBRAIN_GZ_CMD="''${FLYBRAIN_GZ_CMD:-${gzWrapperCmd} gz}"
 
-            ensure-gz-bridge() {
+              ensure-gz-bridge() {
               if ! command -v docker >/dev/null 2>&1; then
                 echo "warning: docker not found; skipping Gazebo bridge image build" >&2
                 return 0
@@ -187,7 +222,7 @@
           '';
           packages = [
             pkgs.colcon
-            pkgs.nixgl.auto.nixGLDefault
+            gzWrapperPkg
             pkgs.px4-gazebo-models
             pkgs.qgroundcontrol
             pkgs.micro-xrce-dds-agent
@@ -231,6 +266,22 @@
               }
             )
           ];
+          };
+
+      in
+      {
+        # NVIDIA (proprietary driver already installed on the host).
+        devShells.default = mkSimShell {
+          gzWrapperPkg = pkgs.nixgl-nvidia-system;
+          gzWrapperCmd = "nixGL";
+        };
+
+        # AMD/Intel, via nixGL's stock Mesa wrapper - no host-specific
+        # patching needed since Mesa ships an open-source amdgpu/iris
+        # driver, unlike NVIDIA.
+        devShells.amd = mkSimShell {
+          gzWrapperPkg = pkgs.nixgl.nixGLIntel;
+          gzWrapperCmd = "nixGLIntel";
         };
 
         legacyPackages = pkgs;
