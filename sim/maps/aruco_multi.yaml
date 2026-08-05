@@ -1,0 +1,65 @@
+world: aruco_multi
+dictionary: DICT_4X4_50
+tag_size_m: 0.5
+frame: world
+tags:
+  0:
+    model: aruco_0
+    surface: floor
+    position: [-9, -6, 0.003]
+    rpy: [0, 0, 0]
+  1:
+    model: aruco_1
+    surface: floor
+    position: [-3, -6, 0.003]
+    rpy: [0, 0, 0]
+  2:
+    model: aruco_2
+    surface: floor
+    position: [3, -6, 0.003]
+    rpy: [0, 0, 0]
+  3:
+    model: aruco_3
+    surface: floor
+    position: [9, -6, 0.003]
+    rpy: [0, 0, 0]
+  4:
+    model: aruco_4
+    surface: floor
+    position: [-9, 0, 0.003]
+    rpy: [0, 0, 1.570796]
+  5:
+    model: aruco_5
+    surface: floor
+    position: [-3, 0, 0.003]
+    rpy: [0, 0, 1.570796]
+  6:
+    model: aruco_6
+    surface: floor
+    position: [3, 0, 0.003]
+    rpy: [0, 0, 1.570796]
+  7:
+    model: aruco_7
+    surface: floor
+    position: [9, 0, 0.003]
+    rpy: [0, 0, 1.570796]
+  8:
+    model: aruco_8
+    surface: floor
+    position: [-9, 6, 0.003]
+    rpy: [0, 0, 3.141593]
+  9:
+    model: aruco_9
+    surface: floor
+    position: [-3, 6, 0.003]
+    rpy: [0, 0, 3.141593]
+  10:
+    model: aruco_10
+    surface: floor
+    position: [3, 6, 0.003]
+    rpy: [0, 0, 3.141593]
+  11:
+    model: aruco_11
+    surface: floor
+    position: [9, 6, 0.003]
+    rpy: [0, 0, 3.141593]

@@ -11,9 +11,9 @@
 set -e
 # Detect install prefix (SIH uses /opt/px4, Gazebo uses /opt/px4-gazebo)
 if [ -d /opt/px4-gazebo ]; then
-PX4_PREFIX=/opt/px4-gazebo
+    PX4_PREFIX=/opt/px4-gazebo
 else
-PX4_PREFIX=/opt/px4
+    PX4_PREFIX=/opt/px4
 fi
 
 # Resolve host.docker.internal to an IPv4 address. mavlink and uxrce_dds_client
@@ -22,13 +22,15 @@ fi
 DOCKER_HOST_IP=$(getent ahostsv4 host.docker.internal 2>/dev/null | awk '/STREAM/ {print $1; exit}')
 
 if [ -n "$DOCKER_HOST_IP" ]; then
-# MAVLink: replace default target (127.0.0.1) with the Docker host IP
-sed -i "s/mavlink start -x -u/mavlink start -x -t $DOCKER_HOST_IP -u/g" \
-"$PX4_PREFIX/etc/init.d-posix/px4-rc.mavlink"
+    # MAVLink: replace default target (127.0.0.1) with the Docker host IP
+    sed -i "s/mavlink start -x -u/mavlink start -x -t $DOCKER_HOST_IP -u/g" \
+        "$PX4_PREFIX/etc/init.d-posix/px4-rc.mavlink"
 
-# DDS: point uXRCE-DDS client at the host
-sed -i "s|uxrce_dds_client start -t udp|uxrce_dds_client start -t udp -h $DOCKER_HOST_IP|" \
-"$PX4_PREFIX/etc/init.d-posix/rcS"
+    # DDS: point uXRCE-DDS client at the host
+    sed -i "s|uxrce_dds_client start -t udp|uxrce_dds_client start -t udp -h $DOCKER_HOST_IP|" \
+        "$PX4_PREFIX/etc/init.d-posix/rcS"
 fi
-export PX4_SIM_MODEL=sihsim_quadx
+# Default to SIH unless the container launcher explicitly selects another model.
+export PX4_SIM_MODEL="${PX4_SIM_MODEL:-sihsim_quadx}"
 exec "$PX4_PREFIX/bin/px4" "$@"
+
