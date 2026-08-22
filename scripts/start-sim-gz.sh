@@ -246,6 +246,40 @@ if [[ -z "${GZ_READY}" ]]; then
     exit 1
 fi
 
+# The server advertises its world topics well before the GUI has built its
+# scene. The GUI takes one full-state snapshot at startup and then only learns
+# about new entities from the world state topic, so a model spawned before it
+# subscribes stays invisible in the GUI even though the server simulates it
+# normally. Wait until the GUI is actually listening before spawning.
+if [[ "${FLYBRAIN_GZ_GUI:-1}" == "1" ]]; then
+    echo "      Waiting for Gazebo GUI..."
+
+    GUI_READY=""
+
+    for _ in {1..240}; do
+        if run_gz topic -l 2>/dev/null | grep -q '^/gui/camera/pose$' &&
+            run_gz topic -i -t "/world/${SIM_WORLD}/state" 2>/dev/null |
+            grep -q '^Subscribers'; then
+            GUI_READY=1
+            break
+        fi
+
+        if ! kill -0 "${GZ_PID}" 2>/dev/null; then
+            echo "Gazebo exited during GUI startup."
+            echo "Gazebo log: ${GZ_LOG}"
+            exit 1
+        fi
+
+        sleep 0.25
+    done
+
+    if [[ -z "${GUI_READY}" ]]; then
+        echo "Timed out waiting for the Gazebo GUI to attach to the world."
+        echo "Gazebo log: ${GZ_LOG}"
+        exit 1
+    fi
+fi
+
 echo "[2/5] Spawning ${MODEL_INSTANCE} into ${SIM_WORLD}..."
 
 sdf_str="<sdf version=\"1.6\"> <include> <uri>file://${MODEL_SDF}</uri> </include> </sdf>"

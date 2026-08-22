@@ -1,7 +1,7 @@
 {
   nixConfig = {
-    extra-substituters = [ "https://ros.cachix.org" ];
-    extra-trusted-public-keys = [ "ros.cachix.org-1:dSyZxI8geDCJrwgvCOHDoAfOm5sV1wCPjBkKL+38Rvo=" ];
+    extra-substituters = [ "https://ros.cachix.org" "http://neb-cache.yeet/neb-cache"];
+    extra-trusted-public-keys = [ "ros.cachix.org-1:dSyZxI8geDCJrwgvCOHDoAfOm5sV1wCPjBkKL+38Rvo=" "neb-cache:KTaVU/xOSztooic5m8ZrvvP/5lp3Lg3Y/P7NUyZtKII="];
   };
 
   inputs = {
